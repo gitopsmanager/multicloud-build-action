@@ -24,7 +24,7 @@ Designed for **self-hosted AKS/EKS** or **GitHub-hosted** runners. Uses **AKS Wo
 - The **caller job has already checked out** the source repo/ref (this action does not `checkout` your code).
 - You provide a **CD repo** that contains:
   ```yaml
-  # cd/config/env-map.yaml
+  # config/env-map.yaml
   build:
     aws_default_container_registry: 123456789012.dkr.ecr.eu-west-1.amazonaws.com
     azure_default_container_registry: myacr.azurecr.io
@@ -72,20 +72,25 @@ This action **does not require GitHub OIDC (`id-token: write`)**, since it uses 
 
 **Included by action:** `yq` (installed if missing), **AWS CLI** (installed if missing).
 
-**Expected on runner:**
-- **Docker & Buildx** (the action configures Buildx on GitHub-hosted runners).
-- **Azure CLI (`az`)** – *not auto-installed*. If your runner lacks `az`, install it before calling the action, e.g.:
-  ```yaml
-  - name: Install Azure CLI (Ubuntu)
-    run: curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+**Docker & Buildx** — Works on both:
+- GitHub-hosted runners: Buildx is set up via `docker/setup-buildx-action`.
+- Self-hosted runners: the action connects to a sidecar BuildKit daemon at `tcp://localhost:12345` (you provide the sidecar).
 
-## External actions used internally
+- **`az: command not found`**
+  - On **Ubuntu runners** (including `ubuntu-latest`): the action **auto-installs Azure CLI** when `push` is `azure` or `both` via the built-in “Ensure Azure CLI (Ubuntu)” step.
+  - On **non-Ubuntu or custom self-hosted runners**: pre-install Azure CLI or add your own install step (the auto-install only runs when `apt-get` is available).
 
-- `tibdex/github-app-token@v1` — CD repo token
-- `actions/checkout@v4` — CD repo checkout
-- `docker/setup-buildx-action@v3`
-- `docker/build-push-action@v5`
-- `affinity7software/detect-cloud@main` — cloud detection
+
+## 🛠 External actions used internally
+
+| Action | Version | Purpose |
+|--------|---------|---------|
+| [tibdex/github-app-token](https://github.com/tibdex/github-app-token) | `v1` | Generate a GitHub App installation token to access the CD repo |
+| [actions/checkout](https://github.com/actions/checkout) | `v4` | Check out the **CD repo** (the caller checks out the source repo) |
+| [docker/setup-buildx-action](https://github.com/docker/setup-buildx-action) | `v3` | Set up Docker Buildx (used on GitHub-hosted runners) |
+| [docker/build-push-action](https://github.com/docker/build-push-action) | `v5` | Build and optionally push images via BuildKit |
+| [affinity7software/detect-cloud](https://github.com/affinity7software/detect-cloud) | `main` | Detect cloud provider (`azure` / `aws` / `unknown`) |
+
 
 ---
 

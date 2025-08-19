@@ -85,7 +85,7 @@ runs:
 
     - name: 🌍 Detect cloud
       id: cloud
-      uses: affinity7software/detect-cloud@main
+      uses: gitopsmanager/detect-cloud@main
       with:
         timeout-ms: 800
 
@@ -131,6 +131,33 @@ runs:
         AZURE_REG=$(yq -r '.build.azure_default_container_registry' cd/config/env-map.yaml)
         echo "aws_registry=$AWS_REG"     >> "$GITHUB_OUTPUT"
         echo "azure_registry=$AZURE_REG" >> "$GITHUB_OUTPUT"
+
+
+    - name: Ensure Azure CLI (Ubuntu)
+      if: inputs.push == 'azure' || inputs.push == 'both'
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        if command -v az >/dev/null 2>&1; then
+          echo "✅ Azure CLI found"
+          az version
+          exit 0
+        fi
+
+        if command -v apt-get >/dev/null 2>&1; then
+          SUDO=""
+          if [ "$(id -u)" -ne 0 ]; then SUDO="sudo"; fi
+          echo "ℹ️ Installing Azure CLI via apt (Ubuntu)..."
+          curl -sL https://aka.ms/InstallAzureCLIDeb | $SUDO bash
+          echo "✅ Azure CLI installed"
+          az version
+        else
+          echo "❌ apt-get not found — this step is Ubuntu-only." >&2
+          exit 1
+        fi
+
+
 
     # 🔐 Azure login (auto: WI → MSI → secret). No GitHub OIDC needed.
     - name: 🔐 Azure login (auto)

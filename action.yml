@@ -1,0 +1,359 @@
+# action.yml
+name: Multicloud Build (composite)
+description: >
+  Build and push Docker images to AWS ECR or Azure ACR using Docker/BuildKit.
+  Supports AKS Workload Identity, Azure MSI/client secret, and EKS Pod Identity or static keys.
+  Loads default registries from a CD repo, optional BuildKit caching, and ECR repo auto-create.
+
+author: Affinity7 Consulting Ltd
+branding:
+  icon: package
+  color: blue
+
+inputs:
+  path:
+    description: "Path to the build context"
+    required: false
+    default: "."
+  image:
+    description: "Image name (e.g. gitopsmanager)"
+    required: true
+  tag:
+    description: "Tag for the image"
+    required: false
+    default: ""
+  build_file:
+    description: "Full path to the Dockerfile (relative to context)"
+    required: false
+    default: "Dockerfile"
+  extra_args:
+    description: "Additional buildkit args"
+    required: false
+    default: ""
+
+  cd_repo:
+    description: "CD repo (owner/repo) with cd/config/env-map.yaml providing default registries"
+    required: true
+
+  push:
+    description: "Where to push the image (aws | azure | both | none)"
+    required: false
+    default: "none"
+
+  buildkit_cache_mode:
+    description: "BuildKit cache mode (min|max|none). Caches only to the current cloud."
+    required: false
+    default: "max"
+
+  # GitHub App for CD repo checkout
+  cd_app_id:
+    description: "GitHub App ID for CD repo access"
+    required: true
+  cd_app_private_key:
+    description: "GitHub App private key (PEM) for CD repo access"
+    required: true
+
+  # Azure credentials (used if not on AKS WI/MSI)
+  azure_client_id:
+    description: "Azure App/Identity client ID"
+    required: false
+    default: ""
+  azure_client_secret:
+    description: "Azure client secret"
+    required: false
+    default: ""
+  azure_tenant_id:
+    description: "Azure tenant ID"
+    required: false
+    default: ""
+
+  # AWS credentials (used if not on EKS Pod Identity)
+  aws_access_key_id:
+    description: "AWS access key ID"
+    required: false
+    default: ""
+  aws_secret_access_key:
+    description: "AWS secret access key"
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: 🔄 Checkout code
+      uses: actions/checkout@v4
+
+    - name: 🌍 Detect cloud
+      id: cloud
+      uses: affinity7software/detect-cloud@main
+      with:
+        timeout-ms: 800
+
+    - name: 🔑 Generate GitHub App token
+      id: generate_token
+      uses: tibdex/github-app-token@v1
+      with:
+        app_id: ${{ inputs.cd_app_id }}
+        private_key: ${{ inputs.cd_app_private_key }}
+        repository: ${{ inputs.cd_repo }}
+
+    - name: 📂 Checkout CD repo
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ inputs.cd_repo }}
+        token: ${{ steps.generate_token.outputs.token }}
+        path: cd
+
+    - name: 📥 Install yq and envsubst
+      shell: bash
+      run: |
+        set -e
+        if ! command -v envsubst >/dev/null 2>&1; then
+          if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update -y && sudo apt-get install -y gettext-base
+          elif command -v yum >/dev/null 2>&1; then
+            sudo yum install -y gettext
+          fi
+        fi
+        if ! command -v yq >/dev/null 2>&1; then
+          YQ_VERSION="v4.40.5"
+          curl -sSL "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64" -o yq
+          chmod +x yq
+          sudo mv yq /usr/local/bin/yq
+        fi
+
+    - name: 📑 Load environment config
+      id: env
+      shell: bash
+      run: |
+        set -euo pipefail
+        AWS_REG=$(yq -r '.build.aws_default_container_registry' cd/config/env-map.yaml)
+        AZURE_REG=$(yq -r '.build.azure_default_container_registry' cd/config/env-map.yaml)
+        echo "aws_registry=$AWS_REG"     >> "$GITHUB_OUTPUT"
+        echo "azure_registry=$AZURE_REG" >> "$GITHUB_OUTPUT"
+
+    # 🔐 Azure login (auto: WI → MSI → secret). No GitHub OIDC needed.
+    - name: 🔐 Azure login (auto)
+      if: inputs.push == 'azure' || inputs.push == 'both'
+      shell: bash
+      env:
+        AZURE_CLIENT_ID: ${{ inputs.azure_client_id }}
+        AZURE_CLIENT_SECRET: ${{ inputs.azure_client_secret }}
+        AZURE_TENANT_ID: ${{ inputs.azure_tenant_id }}
+      run: |
+        set -euo pipefail
+        login_done=0
+
+        # 1) AKS Workload Identity (token file)
+        if [ -n "${AZURE_FEDERATED_TOKEN_FILE:-}" ] && [ -n "${AZURE_CLIENT_ID:-}" ] && [ -n "${AZURE_TENANT_ID:-}" ]; then
+          echo "Using AKS Workload Identity"
+          az login --service-principal \
+            --username "$AZURE_CLIENT_ID" \
+            --tenant   "$AZURE_TENANT_ID" \
+            --federated-token "$(cat "$AZURE_FEDERATED_TOKEN_FILE")" \
+            --allow-no-subscriptions
+          login_done=1
+        fi
+
+        # 2) Node MSI (Azure VM/VMSS)
+        if [ "$login_done" -eq 0 ] && curl -fsS -m 1 -H "Metadata: true" \
+             "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01" >/dev/null 2>&1; then
+          echo "Using node Managed Identity (MSI)"
+          az login --identity ${AZURE_CLIENT_ID:+--username "$AZURE_CLIENT_ID"} --allow-no-subscriptions
+          login_done=1
+        fi
+
+        # 3) Client secret fallback
+        if [ "$login_done" -eq 0 ] && [ -n "${AZURE_CLIENT_ID:-}" ] && [ -n "${AZURE_CLIENT_SECRET:-}" ] && [ -n "${AZURE_TENANT_ID:-}" ]; then
+          echo "Using Azure client secret"
+          az login --service-principal \
+            --username "$AZURE_CLIENT_ID" \
+            --password "$AZURE_CLIENT_SECRET" \
+            --tenant   "$AZURE_TENANT_ID" \
+            --allow-no-subscriptions
+          login_done=1
+        fi
+
+        if [ "$login_done" -eq 0 ]; then
+          echo "❌ No Azure auth method available (WI/MSI/secret). Set AZURE_CLIENT_ID[/SECRET]/AZURE_TENANT_ID or run on AKS/VM with identity." >&2
+          exit 1
+        fi
+
+    - name: 🔐 ACR Login (if pushing to Azure)
+      if: inputs.push == 'azure' || inputs.push == 'both'
+      shell: bash
+      run: |
+        set -euo pipefail
+        REG="${{ steps.env.outputs.azure_registry }}"   # e.g., af7gitops.azurecr.io
+        NAME="${REG%%.*}"                               # -> af7gitops
+        az acr login --name "$NAME"
+
+    - name: 📦 Install AWS CLI (if pushing to AWS)
+      if: inputs.push == 'aws' || inputs.push == 'both'
+      shell: bash
+      run: |
+        set -e
+        if ! command -v aws >/dev/null 2>&1; then
+          curl -sL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip
+          unzip -q awscliv2.zip
+          sudo ./aws/install
+        fi
+
+    - name: ✅ Ensure ECR repository exists
+      if: inputs.push == 'aws' || inputs.push == 'both'
+      shell: bash
+      env:
+        AWS_ACCESS_KEY_ID: ${{ inputs.aws_access_key_id }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.aws_secret_access_key }}
+      run: |
+        set -euo pipefail
+        REG="${{ steps.env.outputs.aws_registry }}"            # e.g. 123456789012.dkr.ecr.eu-west-1.amazonaws.com
+        REPO="${{ inputs.image }}"                             # e.g. myteam/myapp
+        REGION="$(echo "$REG" | cut -d. -f4)"                  # -> eu-west-1
+        export AWS_DEFAULT_REGION="$REGION"
+        if ! aws ecr describe-repositories --repository-names "$REPO" --region "$REGION" >/dev/null 2>&1; then
+          echo "Creating ECR repository '$REPO' in $REGION"
+          aws ecr create-repository \
+            --repository-name "$REPO" \
+            --image-scanning-configuration scanOnPush=true \
+            --region "$REGION" >/dev/null || echo "Repo already exists, continuing."
+        else
+          echo "ECR repository '$REPO' already exists."
+        fi
+
+    - name: 🔐 ECR login
+      if: inputs.push == 'aws' || inputs.push == 'both'
+      shell: bash
+      env:
+        AWS_ACCESS_KEY_ID: ${{ inputs.aws_access_key_id }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.aws_secret_access_key }}
+      run: |
+        set -euo pipefail
+        REG="${{ steps.env.outputs.aws_registry }}"
+        REGION="$(echo "$REG" | cut -d. -f4)"   # parse region from registry
+        export AWS_DEFAULT_REGION="$REGION"
+        aws ecr get-login-password --region "$REGION" \
+          | docker login --username AWS --password-stdin "$REG"
+
+   
+
+
+    - name: 🔧 Compute Docker image tags
+      id: output_tags
+      shell: bash
+      run: |
+        set -euo pipefail
+        TAGS=""
+        AWS_REG="${{ steps.env.outputs.aws_registry }}"
+        AZ_REG="${{ steps.env.outputs.azure_registry }}"
+        IMG="${{ inputs.image }}"
+        RUN="${{ github.run_id }}"
+        TAG_IN="${{ inputs.tag }}"
+
+        add_tags () {
+          local REG="$1"
+          local NAME="$2"
+          local TAG="$3"
+          if [ -n "$REG" ]; then
+            [ -n "$TAGS" ] && TAGS="${TAGS}\n"
+            TAGS+="${REG}/${NAME}:${RUN}"
+            if [ -n "$TAG" ]; then
+              TAGS="${TAGS}\n${REG}/${NAME}:${TAG}"
+            fi
+          fi
+        }
+
+        case "${{ inputs.push }}" in
+          aws)   add_tags "$AWS_REG" "$IMG" "$TAG_IN" ;;
+          azure) add_tags "$AZ_REG"  "$IMG" "$TAG_IN" ;;
+          both)  add_tags "$AWS_REG" "$IMG" "$TAG_IN"; add_tags "$AZ_REG" "$IMG" "$TAG_IN" ;;
+          none)  TAGS="${IMG}:${RUN}"; [ -n "$TAG_IN" ] && TAGS="${TAGS}\n${IMG}:${TAG_IN}" ;;
+          *)     echo "❌ Invalid value for inputs.push: '${{ inputs.push }}' (expected aws|azure|both|none)" >&2; exit 1 ;;
+        esac
+
+        echo "tags<<EOF" >> "$GITHUB_OUTPUT"
+        printf "%b\n" "$TAGS" >> "$GITHUB_OUTPUT"
+        echo "EOF" >> "$GITHUB_OUTPUT"
+
+    - name: 🐳 Set up Docker Buildx
+      if: "!contains(runner.name, 'self-hosted')"
+      uses: docker/setup-buildx-action@v3
+
+    - name: 🔧 Set up sidecar BuildKit builder
+      if: "contains(runner.name, 'self-hosted')"
+      shell: bash
+      run: |
+        docker buildx create --name remote-builder --driver remote --use tcp://localhost:12345
+        docker buildx inspect --bootstrap
+
+    - name: ⚙️ Compute cache refs (provider-aware)
+      id: cacherefs
+      shell: bash
+      run: |
+        set -euo pipefail
+        PROVIDER="${{ steps.cloud.outputs.provider }}"   # azure | aws | unknown
+        PUSH="${{ inputs.push }}"                        # aws | azure | both | none
+        MODE="${{ inputs.buildkit_cache_mode }}"         # min | max | none
+        AWS_REG="${{ steps.env.outputs.aws_registry }}"
+        AZ_REG="${{ steps.env.outputs.azure_registry }}"
+        IMG="${{ inputs.image }}"
+        CF=""; CT=""
+
+        pick_single_cache() {
+          local REG="$1"
+          if [ -n "$REG" ]; then
+            CF="type=registry,ref=${REG}/${IMG}:buildcache"
+            CT="type=registry,ref=${REG}/${IMG}:buildcache,mode=${MODE},ignore-error=true"
+          fi
+        }
+
+        if [ "$MODE" != "none" ] && [ "$PUSH" != "none" ]; then
+          case "$PROVIDER" in
+            azure) pick_single_cache "$AZ_REG" ;;
+            aws)   pick_single_cache "$AWS_REG" ;;
+            *)     : ;;
+          esac
+        fi
+
+        echo "from=$CF" >> "$GITHUB_OUTPUT"
+        echo "to=$CT"   >> "$GITHUB_OUTPUT"
+
+    # Add this right before the build step (after loading config, before Buildx)
+    - name: 🔎 Validate build context & Dockerfile
+      shell: bash
+      run: |
+        set -euo pipefail
+        CTX="${{ inputs.path }}"
+        DF="${{ inputs.build_file }}"
+        FILE="$CTX/$DF"
+
+        if [ -z "$CTX" ] || [ ! -d "$CTX" ]; then
+          echo "❌ Build context directory not found: $CTX" >&2
+          echo "Tip: ensure the caller job ran 'actions/checkout' and passed the correct 'path'." >&2
+          exit 1
+        fi
+
+        if [ -z "$DF" ] || [ ! -f "$FILE" ]; then
+          echo "❌ Dockerfile not found at: $FILE" >&2
+          echo "Tip: set 'build_file' relative to 'path' (default: Dockerfile)." >&2
+          exit 1
+        fi
+
+        # Optional: ensure Dockerfile is inside context
+        case "$(realpath "$FILE")" in
+          "$(realpath "$CTX")"/*) : ;;
+          *) echo "❌ 'build_file' must be inside the build context directory." >&2; exit 1 ;;
+        esac
+
+    # …then your existing build step uses inputs.path directly:
+    - name: 🏗️ Build and (optionally) Push image(s)
+      uses: docker/build-push-action@v5
+      with:
+        context: ${{ inputs.path }}
+        file: ${{ inputs.path }}/${{ inputs.build_file }}
+        push: ${{ inputs.push != 'none' }}
+        tags: ${{ steps.output_tags.outputs.tags }}
+        cache-from: ${{ steps.cacherefs.outputs.from }}
+        cache-to:   ${{ steps.cacherefs.outputs.to }}
+        build-args: |
+          ${{ inputs.extra_args }}

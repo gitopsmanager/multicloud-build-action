@@ -85,11 +85,11 @@ This action **does not require GitHub OIDC (`id-token: write`)**, since it uses 
 
 | Action | Version | Purpose |
 |--------|---------|---------|
-| [tibdex/github-app-token](https://github.com/tibdex/github-app-token) | `v1` | Generate a GitHub App installation token to access the CD repo |
+| [tibdex/github-app-token](https://github.com/tibdex/github-app-token) | `v2.1.0` | Generate a GitHub App installation token to access the CD repo |
 | [actions/checkout](https://github.com/actions/checkout) | `v4` | Check out the **CD repo** (the caller checks out the source repo) |
 | [docker/setup-buildx-action](https://github.com/docker/setup-buildx-action) | `v3` | Set up Docker Buildx (used on GitHub-hosted runners) |
 | [docker/build-push-action](https://github.com/docker/build-push-action) | `v5` | Build and optionally push images via BuildKit |
-| [affinity7software/detect-cloud](https://github.com/affinity7software/detect-cloud) | `main` | Detect cloud provider (`azure` / `aws` / `unknown`) |
+| [gitopsmanager/detect-cloud](https://github.com/gitopsmanager/detect-cloud) | `main` | Detect cloud provider (`azure` / `aws` / `unknown`) |
 
 
 ---

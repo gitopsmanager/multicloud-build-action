@@ -61,7 +61,7 @@ Provide a single `{ image, build_file, path }` **or** pass a **JSON array** of `
   {"context":"./services/a","build_file":"Dockerfile","image_name":"team/svc-a"},
   {"context":"./services/b","build_file":"Dockerfile","image_name":"team/svc-b"}
 ]
-
+```
 ## 🔐 Auth (automatic selection)
 
 - **Azure (ACR):** AKS **Workload Identity** → VM **MSI** → **client secret** fallback.  

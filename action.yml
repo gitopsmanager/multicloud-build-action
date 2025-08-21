@@ -11,6 +11,16 @@ branding:
   color: blue
 
 inputs:
+  image_details:
+    description: |
+      JSON array of {context, build_file, image_name} or specify a single build with separate parmeters. 
+      Example:
+      [
+        {"context":"./services/a","build_file":"Dockerfile","image_name":"team/svc-a"},
+        {"context":"./services/b","build_file":"Dockerfile","image_name":"team/svc-b"}
+      ]
+    required: false
+    type: string
   path:
     description: "Path to the build context"
     required: false
@@ -83,12 +93,6 @@ runs:
     - name: 🔄 Checkout code
       uses: actions/checkout@v4
 
-    - name: 🌍 Detect cloud
-      id: cloud
-      uses: gitopsmanager/detect-cloud@main
-      with:
-        timeout-ms: 800
-
     - name: 🔑 Generate GitHub App token
       id: generate_token
       uses: tibdex/github-app-token@v2.1.0
@@ -104,33 +108,16 @@ runs:
         token: ${{ steps.generate_token.outputs.token }}
         path: cd
 
-    - name: 📥 Install yq and envsubst
-      shell: bash
-      run: |
-        set -e
-        if ! command -v envsubst >/dev/null 2>&1; then
-          if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get update -y && sudo apt-get install -y gettext-base
-          elif command -v yum >/dev/null 2>&1; then
-            sudo yum install -y gettext
-          fi
-        fi
-        if ! command -v yq >/dev/null 2>&1; then
-          YQ_VERSION="v4.40.5"
-          curl -sSL "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64" -o yq
-          chmod +x yq
-          sudo mv yq /usr/local/bin/yq
-        fi
-
     - name: 📑 Load environment config
       id: env
-      shell: bash
-      run: |
-        set -euo pipefail
-        AWS_REG=$(yq -r '.build.aws_default_container_registry' cd/config/env-map.yaml)
-        AZURE_REG=$(yq -r '.build.azure_default_container_registry' cd/config/env-map.yaml)
-        echo "aws_registry=$AWS_REG"     >> "$GITHUB_OUTPUT"
-        echo "azure_registry=$AZURE_REG" >> "$GITHUB_OUTPUT"
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs');
+          const cfg = JSON.parse(fs.readFileSync('cd/config/env-map.json', 'utf8'));
+          core.setOutput('aws_registry',   cfg.build.aws_default_container_registry);
+          core.setOutput('azure_registry', cfg.build.azure_default_container_registry);
+
 
 
     - name: Ensure Azure CLI (Ubuntu)
@@ -262,46 +249,47 @@ runs:
         aws ecr get-login-password --region "$REGION" \
           | docker login --username AWS --password-stdin "$REG"
 
+
+    - name: normalize-inputs
+      id: normalize
+      uses: actions/github-script@v7
+      env:
+        IMAGE_DETAILS: ${{ inputs.image_details }}
+        SINGLE_IMAGE:  ${{ inputs.image }}
+        SINGLE_DF:     ${{ inputs.build_file }}
+        SINGLE_CTX:    ${{ inputs.path }}
+      with:
+        script: |
+          const raw   = (process.env.IMAGE_DETAILS || '').trim();
+          const image = (process.env.SINGLE_IMAGE  || '').trim();
+          const df    = (process.env.SINGLE_DF     || '').trim();
+          const ctx   = (process.env.SINGLE_CTX    || '.').trim() || '.';
+
+          let items;
+          if (raw) {
+            items = JSON.parse(raw);
+            if (!Array.isArray(items)) throw new Error('image_details must be a JSON array');
+          } else if (image && df) {
+            items = [{ context: ctx, build_file: df, image_name: image }];
+          } else {
+            throw new Error('Provide either inputs.image_details (JSON array) OR both inputs.image and inputs.build_file (and optional inputs.path).');
+          }
+
+          items.forEach((it, i) => {
+            const miss = ['context','build_file','image_name'].filter(k => !it?.[k]);
+            if (miss.length) throw new Error(`items[${i}] missing: ${miss.join(', ')}`);
+          });
+
+          core.setOutput('items', JSON.stringify(items));
+          core.setOutput('count', String(items.length));
+
+          // 🔎 Print normalized inputs for debugging
+          core.startGroup('normalized items');
+          core.info(JSON.stringify(items, null, 2));
+          core.info(`count: ${items.length}`);
+          core.endGroup();
+
    
-
-
-    - name: 🔧 Compute Docker image tags
-      id: output_tags
-      shell: bash
-      run: |
-        set -euo pipefail
-        TAGS=""
-        AWS_REG="${{ steps.env.outputs.aws_registry }}"
-        AZ_REG="${{ steps.env.outputs.azure_registry }}"
-        IMG="${{ inputs.image }}"
-        RUN="${{ github.run_id }}"
-        TAG_IN="${{ inputs.tag }}"
-
-        add_tags () {
-          local REG="$1"
-          local NAME="$2"
-          local TAG="$3"
-          if [ -n "$REG" ]; then
-            [ -n "$TAGS" ] && TAGS="${TAGS}\n"
-            TAGS+="${REG}/${NAME}:${RUN}"
-            if [ -n "$TAG" ]; then
-              TAGS="${TAGS}\n${REG}/${NAME}:${TAG}"
-            fi
-          fi
-        }
-
-        case "${{ inputs.push }}" in
-          aws)   add_tags "$AWS_REG" "$IMG" "$TAG_IN" ;;
-          azure) add_tags "$AZ_REG"  "$IMG" "$TAG_IN" ;;
-          both)  add_tags "$AWS_REG" "$IMG" "$TAG_IN"; add_tags "$AZ_REG" "$IMG" "$TAG_IN" ;;
-          none)  TAGS="${IMG}:${RUN}"; [ -n "$TAG_IN" ] && TAGS="${TAGS}\n${IMG}:${TAG_IN}" ;;
-          *)     echo "❌ Invalid value for inputs.push: '${{ inputs.push }}' (expected aws|azure|both|none)" >&2; exit 1 ;;
-        esac
-
-        echo "tags<<EOF" >> "$GITHUB_OUTPUT"
-        printf "%b\n" "$TAGS" >> "$GITHUB_OUTPUT"
-        echo "EOF" >> "$GITHUB_OUTPUT"
-
     - name: 🐳 Set up Docker Buildx
       if: "!contains(runner.name, 'self-hosted')"
       uses: docker/setup-buildx-action@v3
@@ -313,74 +301,114 @@ runs:
         docker buildx create --name remote-builder --driver remote --use tcp://localhost:12345
         docker buildx inspect --bootstrap
 
-    - name: ⚙️ Compute cache refs (provider-aware)
-      id: cacherefs
-      shell: bash
-      run: |
-        set -euo pipefail
-        PROVIDER="${{ steps.cloud.outputs.provider }}"   # azure | aws | unknown
-        PUSH="${{ inputs.push }}"                        # aws | azure | both | none
-        MODE="${{ inputs.buildkit_cache_mode }}"         # min | max | none
-        AWS_REG="${{ steps.env.outputs.aws_registry }}"
-        AZ_REG="${{ steps.env.outputs.azure_registry }}"
-        IMG="${{ inputs.image }}"
-        CF=""; CT=""
 
-        pick_single_cache() {
-          local REG="$1"
-          if [ -n "$REG" ]; then
-            CF="type=registry,ref=${REG}/${IMG}:buildcache"
-            CT="type=registry,ref=${REG}/${IMG}:buildcache,mode=${MODE},ignore-error=true"
-          fi
-        }
-
-        if [ "$MODE" != "none" ] && [ "$PUSH" != "none" ]; then
-          case "$PROVIDER" in
-            azure) pick_single_cache "$AZ_REG" ;;
-            aws)   pick_single_cache "$AWS_REG" ;;
-            *)     : ;;
-          esac
-        fi
-
-        echo "from=$CF" >> "$GITHUB_OUTPUT"
-        echo "to=$CT"   >> "$GITHUB_OUTPUT"
-
-    # Add this right before the build step (after loading config, before Buildx)
-    - name: 🔎 Validate build context & Dockerfile
-      shell: bash
-      run: |
-        set -euo pipefail
-        CTX="${{ inputs.path }}"
-        DF="${{ inputs.build_file }}"
-        FILE="$CTX/$DF"
-
-        if [ -z "$CTX" ] || [ ! -d "$CTX" ]; then
-          echo "❌ Build context directory not found: $CTX" >&2
-          echo "Tip: ensure the caller job ran 'actions/checkout' and passed the correct 'path'." >&2
-          exit 1
-        fi
-
-        if [ -z "$DF" ] || [ ! -f "$FILE" ]; then
-          echo "❌ Dockerfile not found at: $FILE" >&2
-          echo "Tip: set 'build_file' relative to 'path' (default: Dockerfile)." >&2
-          exit 1
-        fi
-
-        # Optional: ensure Dockerfile is inside context
-        case "$(realpath "$FILE")" in
-          "$(realpath "$CTX")"/*) : ;;
-          *) echo "❌ 'build_file' must be inside the build context directory." >&2; exit 1 ;;
-        esac
-
-    # …then your existing build step uses inputs.path directly:
-    - name: 🏗️ Build and (optionally) Push image(s)
-      uses: docker/build-push-action@v5
+    # Detect which cloud this runner is on (self-hosted ⇒ aws/azure, GH-hosted ⇒ unknown)
+    - name: Detect cloud
+      id: cloud
+      uses: gitopsmanager/detect-cloud@main
       with:
-        context: ${{ inputs.path }}
-        file: ${{ inputs.path }}/${{ inputs.build_file }}
+        timeout-ms: 800
+
+
+    # Set cache to ONE registry only (prefer the detected cloud)
+    - name: set-cache-to-provider
+      id: enhance
+      uses: actions/github-script@v7
+      env:
+        ITEMS:    ${{ steps.normalize.outputs.items }}
+        PROVIDER: ${{ steps.cloud.outputs.provider }}     # aws | azure | unknown
+        PUSH:     ${{ inputs.push }}                      # none | aws | azure | both
+        MODE:     ${{ inputs.buildkit_cache_mode }}       # none | min | max
+        AWS_REG:  ${{ steps.env.outputs.aws_registry }}
+        AZ_REG:   ${{ steps.env.outputs.azure_registry }}
+      with:
+        script: |
+          const items = JSON.parse(process.env.ITEMS);
+          const provider = (process.env.PROVIDER || 'unknown').toLowerCase();
+          const PUSH = (process.env.PUSH || 'none').toLowerCase();
+          const MODE = (process.env.MODE || 'none').toLowerCase();
+          const AWS  = process.env.AWS_REG || '';
+          const AZ   = process.env.AZ_REG  || '';
+
+          // Choose exactly ONE cache registry
+          let cacheCloud = '';
+          if (provider === 'aws' || provider === 'azure') {
+            cacheCloud = provider;                      // self-hosted, detected cloud
+          } else {
+            // GH-hosted or blocked IMDS: pick a sensible fallback based on what we're pushing
+            if (PUSH === 'azure' || PUSH === 'both') cacheCloud = 'azure';
+            else if (PUSH === 'aws')                cacheCloud = 'aws';
+            else cacheCloud = ''; // not pushing anywhere; skip caching
+          }
+
+          const pick = (reg, img, mode) => reg ? {
+            from: [`type=registry,ref=${reg}/${img}:buildcache`],
+            to:   [`type=registry,ref=${reg}/${img}:buildcache,mode=${mode},ignore-error=true`]
+          } : { from: [], to: [] };
+
+          const out = items.map(it => {
+            let cacheFrom = [], cacheTo = [];
+            if (MODE !== 'none' && PUSH !== 'none') {
+              if (cacheCloud === 'azure') ({ from: cacheFrom, to: cacheTo } = pick(AZ, it.image_name, MODE));
+              if (cacheCloud === 'aws')   ({ from: cacheFrom, to: cacheTo } = pick(AWS, it.image_name, MODE));
+            }
+            return { ...it, cacheFrom, cacheTo };
+          });
+
+          core.setOutput('items', JSON.stringify(out));
+          core.setOutput('count', String(out.length));
+
+    # Generate bake file; (optionally) push to both registries in one build
+    - name: generate-bake
+      id: bakefile
+      if: ${{ steps.enhance.outputs.count != '0' }}
+      uses: actions/github-script@v7
+      env:
+        ITEMS:   ${{ steps.enhance.outputs.items }}
+        PUSH:    ${{ inputs.push }}
+        AWS_REG: ${{ steps.env.outputs.aws_registry }}
+        AZ_REG:  ${{ steps.env.outputs.azure_registry }}
+        TAG:     ${{ github.sha }}   # or another tag source
+      with:
+        script: |
+          const fs = require('fs');
+          const items = JSON.parse(process.env.ITEMS);
+          const PUSH  = (process.env.PUSH || 'none').toLowerCase();
+          const AWS   = process.env.AWS_REG || '';
+          const AZ    = process.env.AZ_REG  || '';
+          const TAG   = (process.env.TAG || '').slice(0,12) || 'dev';
+
+          const target = {}, targets = [];
+          items.forEach((it, i) => {
+            const name = `t${i}`;
+            const tags = [];
+
+            // Build once, push to both registries if requested
+            if (PUSH === 'aws' || PUSH === 'both')   tags.push(`${AWS}/${it.image_name}:${TAG}`);
+            if (PUSH === 'azure' || PUSH === 'both') tags.push(`${AZ}/${it.image_name}:${TAG}`);
+            if (PUSH === 'none' && it.image_name)    tags.push(`${it.image_name}:${TAG}`); // local tag only
+
+            target[name] = {
+              context: it.context,
+              dockerfile: `${it.context}/${it.build_file}`,
+              tags
+            };
+            if (it.cacheFrom?.length) target[name]['cache-from'] = it.cacheFrom;
+            if (it.cacheTo?.length)   target[name]['cache-to']   = it.cacheTo;
+
+            targets.push(name);
+          });
+
+          const bake = { group: { default: { targets } }, target };
+          fs.writeFileSync('docker-bake.json', JSON.stringify(bake, null, 2));
+          core.startGroup('docker-bake.json'); core.info(fs.readFileSync('docker-bake.json','utf8')); core.endGroup();
+
+    # Bake with live workspace (includes files generated earlier)
+    - name: bake
+      uses: docker/bake-action@v6
+      with:
+        source: .
+        files: docker-bake.json
         push: ${{ inputs.push != 'none' }}
-        tags: ${{ steps.output_tags.outputs.tags }}
-        cache-from: ${{ steps.cacherefs.outputs.from }}
-        cache-to:   ${{ steps.cacherefs.outputs.to }}
-        build-args: |
-          ${{ inputs.extra_args }}
+        # builder: remote-builder
+

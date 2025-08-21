@@ -120,6 +120,8 @@ jobs:
           push: both                 # aws | azure | both | none
           buildkit_cache_mode: max   # none | min | max
 
+```
+
 ## B) Multiple images (JSON array)
 
 ```yaml
@@ -138,7 +140,7 @@ jobs:
             ]
           push: both
           buildkit_cache_mode: min
-
+```
 > **Note:** Place your registries in `cd/config/env-map.json` (**JSON**). The action reads this file directly; no YAML and no `yq` required.
 
 ---

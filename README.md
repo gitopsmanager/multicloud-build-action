@@ -1,160 +1,186 @@
 # 🚀 Multicloud Build Action (Composite) — *Beta* `@main`
 
 Build and optionally push Docker images to **AWS ECR** and/or **Azure ACR** from a single action.  
-Designed for **self-hosted AKS/EKS** or **GitHub-hosted** runners. Uses **AKS Workload Identity** / **Azure MSI** or **EKS Pod Identity** / static keys, loads default registries from your **CD repo**, supports **BuildKit caching**, and **auto-creates ECR repositories** when needed.
+Optimized for **self-hosted AKS/EKS** runners (with a BuildKit sidecar) and works on **GitHub-hosted** runners too.  
+Now uses **Buildx Bake** for parallel multi-image builds and reads default registries from a **JSON** env map.
 
-> **Beta:** Pin to `@main` while you test. Stable tags (`v1`) will follow after broader validation.
+> **Beta:** Pin to `@main` while testing. Stable tags (e.g., `v1`) will follow after broader validation.
 
 ---
 
 ## ✅ Highlights
 
-- 🐳 **Build** with Docker/BuildKit and **push** to **AWS**, **Azure**, **both**, or **build-only**
-- 🔐 **Auth**:
-  - **Azure:** AKS **Workload Identity** → Node **MSI** → **Client secret** (fallback)
-  - **AWS:** **EKS Pod Identity** / node role → **Access keys** (fallback)
-- 🗺️ **CD repo config:** reads default registries from `cd/config/env-map.yaml`
-- 🧠 **Smart cache:** BuildKit cache (min/max/none), **cached to the cloud you’re on**
-- 🧰 **ECR repo ensure:** creates the ECR repo on first push if missing
+- 🐳 **Build once** and **push** to **AWS**, **Azure**, **both**, or **build-only**.
+- 🧺 **Buildx Bake**: parallel multi-image builds from either:
+  - a single `{ image, build_file, path }` triple, or
+  - a **JSON array** of `{ context, build_file, image_name }`.
+- 🧠 **Smart cache**: BuildKit cache targeted to **the cloud the runner is on** (via `detect-cloud`), with sensible fallback on GitHub-hosted runners.
+- 🗺️ **CD config (JSON)**: reads default registries from `cd/config/env-map.json`.
+- 🧰 **ECR ensure**: auto-creates the ECR repository on first push if missing.
 
 ---
 
-## ⚙️ What this action assumes
 
-- The **caller job has already checked out** the source repo/ref (this action does not `checkout` your code).
-- You provide a **CD repo** that contains:
-  ```yaml
-  # config/env-map.yaml
-  build:
-    aws_default_container_registry: 123456789012.dkr.ecr.eu-west-1.amazonaws.com
-    azure_default_container_registry: myacr.azurecr.io
+- **Env map is now JSON, not YAML.**  
+  The action reads `cd/config/env-map.json`:
+  ```json
+  {
+    "build": {
+      "aws_default_container_registry": "123456789012.dkr.ecr.eu-west-1.amazonaws.com",
+      "azure_default_container_registry": "myacr.azurecr.io"
+    }
+  }
 
+
+## Bake by default
+
+Internally the action **normalizes your inputs** → **generates** a `docker-bake.json` → **runs** `docker buildx bake` with `source: .` so files created earlier in the job are included.
+
+---
+
+## Inputs can be simple or advanced
+
+Provide a single `{ image, build_file, path }` **or** pass a **JSON array** of `{ context, build_file, image_name }`.
+
+---
 
 ## 🧩 Inputs
 
-| Input                  | Required | Default     | Description                                                                 |
-|------------------------|:--------:|-------------|-----------------------------------------------------------------------------|
-| `path`                 | ❌       | `.`         | Docker build context path.                                                  |
-| `image`                | ✅       |             | Image name (e.g., `myteam/myapp`).                                          |
-| `tag`                  | ❌       | `""`        | Optional tag; action also tags with `${{ github.run_id }}`.                 |
-| `build_file`           | ❌       | `Dockerfile`| Dockerfile path relative to `path`.                                         |
-| `extra_args`           | ❌       | `""`        | Extra build args (newline-separated).                                       |
-| `push`                 | ❌       | `none`      | Where to push: `aws` \| `azure` \| `both` \| `none`.                        |
-| `buildkit_cache_mode`  | ❌       | `max`       | BuildKit cache: `min` \| `max` \| `none`. Cached to current cloud only.     |
-| `cd_repo`              | ✅       |             | CD repo `owner/name` containing `cd/config/env-map.yaml`.                   |
-| `cd_app_id`            | ✅       |             | GitHub App ID (to read the CD repo).                                        |
-| `cd_app_private_key`   | ✅       |             | GitHub App private key (PEM) for the CD repo.                               |
-| `azure_client_id`      | ❌       | `""`        | Azure UAMI/App client ID (needed for WI/MSI or secret fallback).            |
-| `azure_client_secret`  | ❌       | `""`        | Azure client secret (fallback when not on AKS/MSI).                         |
-| `azure_tenant_id`      | ❌       | `""`        | Azure tenant ID (required for WI/secret).                                   |
-| `aws_access_key_id`    | ❌       | `""`        | AWS access key (fallback when not on EKS/node role).                        |
-| `aws_secret_access_key`| ❌       | `""`        | AWS secret key (fallback).                                                  |
+| Input                 | Required | Default      | Description                                                                 |
+|----------------------|:--------:|--------------|-----------------------------------------------------------------------------|
+| `image_details`      | ❌       |              | **JSON array** of `{context, build_file, image_name}`. If set, takes precedence. |
+| `image`              | ❌       |              | **Single image** repository/name (e.g., `team/svc-a`). Used when `image_details` is not provided. |
+| `build_file`         | ❌       | `Dockerfile` | Dockerfile path **relative to** `path` (single-image mode).                |
+| `path`               | ❌       | `.`          | Build context dir for single-image mode.                                    |
+| `push`               | ❌       | `none`       | Where to push: `aws` \| `azure` \| `both` \| `none`.                        |
+| `buildkit_cache_mode`| ❌       | `min`        | Cache mode: `none` \| `min` \| `max`. Cached **only** to the detected cloud’s registry. |
 
-**Auth selection is automatic:**
-- **Azure:** AKS WI (token file) → MSI → client secret.  
-- **AWS:** Pod/instance identity → access keys.
+**`image_details` example (two images):**
+```json
+[
+  {"context":"./services/a","build_file":"Dockerfile","image_name":"team/svc-a"},
+  {"context":"./services/b","build_file":"Dockerfile","image_name":"team/svc-b"}
+]
 
----
+## 🔐 Auth (automatic selection)
 
-## 🔐 What credentials are actually required?
+- **Azure (ACR):** AKS **Workload Identity** → VM **MSI** → **client secret** fallback.  
+- **AWS (ECR):** **Pod/instance identity** (IRSA/role) → **access keys** fallback.
 
-- **On AKS (self-hosted):** set `AZURE_CLIENT_ID` + `AZURE_TENANT_ID` inputs; the action uses the pod’s **Workload Identity** token file. No client secret needed.
-- **On Azure VM runner:** **MSI** is used if available; optionally set `azure_client_id` to select a **user-assigned** identity.
-- **Off Azure (e.g., EKS or GH-hosted) and pushing to ACR:** pass **Azure client secret** (`azure_client_id`, `azure_client_secret`, `azure_tenant_id`).
-- **On EKS/EC2 (self-hosted):** **Pod/instance identity** is used automatically for ECR.
-- **Off AWS (e.g., AKS or GH-hosted) and pushing to ECR:** pass **AWS keys** (`aws_access_key_id`, `aws_secret_access_key`).
-
-This action **does not require GitHub OIDC (`id-token: write`)**, since it uses AKS WI/MSI or Azure client secret, and EKS Pod Identity or AWS keys.
+> On **GitHub-hosted** runners, use Azure client secret or AWS keys when pushing to that cloud.
 
 ---
 
-## 🛠 Tools used / required
+## 🛠 What the action does (under the hood)
 
-**Included by action:** `yq` (installed if missing), **AWS CLI** (installed if missing).
-
-**Docker & Buildx** — Works on both:
-- GitHub-hosted runners: Buildx is set up via `docker/setup-buildx-action`.
-- Self-hosted runners: the action connects to a sidecar BuildKit daemon at `tcp://localhost:12345` (you provide the sidecar).
-
-- **`az: command not found`**
-  - On **Ubuntu runners** (including `ubuntu-latest`): the action **auto-installs Azure CLI** when `push` is `azure` or `both` via the built-in “Ensure Azure CLI (Ubuntu)” step.
-  - On **non-Ubuntu or custom self-hosted runners**: pre-install Azure CLI or add your own install step (the auto-install only runs when `apt-get` is available).
+1. **Detects cloud** (`azure` / `aws` / `unknown`) using `gitopsmanager/detect-cloud@main`.
+2. **Loads registries** from `cd/config/env-map.json` (JSON) in your repo:
+   ```text
+   build.aws_default_container_registry
+   build.azure_default_container_registry
 
 
-## 🛠 External actions used internally
+## 🔁 Normalizes inputs
 
-| Action | Version | Purpose |
-|--------|---------|---------|
-| [tibdex/github-app-token](https://github.com/tibdex/github-app-token) | `v2.1.0` | Generate a GitHub App installation token to access the CD repo |
-| [actions/checkout](https://github.com/actions/checkout) | `v4` | Check out the **CD repo** (the caller checks out the source repo) |
-| [docker/setup-buildx-action](https://github.com/docker/setup-buildx-action) | `v3` | Set up Docker Buildx (used on GitHub-hosted runners) |
-| [docker/build-push-action](https://github.com/docker/build-push-action) | `v5` | Build and optionally push images via BuildKit |
-| [gitopsmanager/detect-cloud](https://github.com/gitopsmanager/detect-cloud) | `main` | Detect cloud provider (`azure` / `aws` / `unknown`) |
+- If **`image_details`** is provided, parses it as a **JSON array**.
+- Otherwise builds a **single-item array** from `{ image, build_file, path }`.
 
+---
+
+## ☁️ Provider-aware caching
+
+- Chooses **one** registry for cache (**AWS** or **Azure**) based on detected cloud (fallbacks if unknown).
+- Adds **`cache-from` / `cache-to`** to each target.
+
+---
+
+## 🧩 Bake plan & execution
+
+- **Generates** `docker-bake.json` (**one target per item**).  
+  If `push: both`, each target is tagged for **both registries**; Buildx pushes both after a **single** build graph execution.
+- **Runs Bake** with **`source: .`** and pushes if requested.
 
 ---
 
 ## 🧪 Usage (Beta `@main`)
 
-### Build and push to both clouds using CD repo registries
+### A) Single image (simple)
+```yaml
+jobs:
+  build:
+    runs-on: ubuntu-latest # or self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: your-org/multicloud-build-action@main
+        with:
+          image: team/svc-a
+          build_file: Dockerfile
+          path: ./services/a
+          push: both                 # aws | azure | both | none
+          buildkit_cache_mode: max   # none | min | max
+
+## B) Multiple images (JSON array)
+
 ```yaml
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4  # caller checks out source repo
+      - uses: actions/checkout@v4
 
       - uses: your-org/multicloud-build-action@main
         with:
-          path: .
-          image: myteam/myapp
-          tag: ${{ github.sha }}
+          image_details: |
+            [
+              {"context":"./services/a","build_file":"Dockerfile","image_name":"team/svc-a"},
+              {"context":"./services/b","build_file":"Dockerfile","image_name":"team/svc-b"}
+            ]
           push: both
-          buildkit_cache_mode: max
-          cd_repo: your-org/your-cd-repo
-          cd_app_id: ${{ secrets.CD_APP_ID }}
-          cd_app_private_key: ${{ secrets.CD_APP_PRIVATE_KEY }}
-          # Azure creds only needed when NOT on AKS/MSI:
-          azure_client_id: ${{ secrets.AZURE_CLIENT_ID }}
-          azure_client_secret: ${{ secrets.AZURE_CLIENT_SECRET }}
-          azure_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
-          # AWS creds only needed when NOT on EKS/EC2:
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          buildkit_cache_mode: min
 
-Build only (no push)
-- uses: your-org/multicloud-build-action@main
-  with:
-    path: .
-    image: myteam/myapp
-    push: none
+> **Note:** Place your registries in `cd/config/env-map.json` (**JSON**). The action reads this file directly; no YAML and no `yq` required.
 
-🧠 How it works (flow)
+---
 
-- Detects cloud (azure/aws/unknown) with detect-cloud@main — used for cache targeting.
-- CD repo checkout via GitHub App → reads default registries from cd/config/env-map.yaml.
-- Azure auth: tries AKS WI (token file) → MSI → client secret.
-- AWS auth: uses Pod/instance identity or keys, then logs in to ECR.
-- ECR ensure: creates the ECR repo if missing (idempotent).
-- Tagging: always tags with ${{ github.run_id }}; adds your tag if provided.
-- BuildKit cache: min/max/none, cached to current cloud only.
-- Build & push: via docker/build-push-action@v5.
+## 🧱 BuildKit & Bake notes
 
-🧰 Troubleshooting
+- **Bake parallelism:** targets are scheduled **in parallel** by BuildKit. With a **single sidecar** BuildKit, all parallelism happens **inside that pod** (size CPU/RAM/disk accordingly).
+- **`source: .`** ensures Bake sees files you created earlier in the job (not a Git snapshot).
+- **Cache to one cloud:** to reduce upload/egress, cache layers to a **single** registry—the detected cloud. Images can still be pushed to **both** registries by giving **two tags** per target.
 
-- az: command not found — Install Azure CLI on your runner (see snippet above).
-- No Azure auth method available — Provide azure_client_id + azure_tenant_id (for WI/MSI), or include azure_client_secret for fallback.
-- AccessDeniedException pushing to ECR — Ensure your Pod Identity/role or keys include ECR permissions (GetAuthorizationToken, PutImage, UploadLayer*, etc.).
-- GitHub-hosted runners — Cloud detection returns unknown; use Azure secret or AWS keys if pushing to that cloud.
+---
 
-🧪 Status & Versioning
+## 🔧 Self-hosted tips (AKS/EKS)
 
-- Beta: use @main while testing in your environments.
-- Planned tags:
-  - v1.0.0 — first stable
-  - v1 — floating tag for latest v1
-- Breaking changes may occur before v1.0.0.
+- Run a **BuildKit sidecar** (`buildkitd`) next to the runner; mount a **fast SSD PVC** at `/var/lib/buildkit`; set resource requests/limits.
+- Consider **generic ephemeral PVCs** for per-pod cache disks if runners are ephemeral.
+- Keep a **registry cache** in Bake (`cache-to`/`cache-from`) so fresh pods/runners warm quickly.
+- If one sidecar is a bottleneck, scale out to a **multi-node builder** and append multiple BuildKit endpoints to your Buildx builder.
 
-📄 License
+---
 
-MIT © 2025 Affinity7 Consulting Ltd — see LICENSE.
+## 🧰 External actions used internally
+
+| Action                         | Version | Purpose                                         |
+|--------------------------------|---------|-------------------------------------------------|
+| `gitopsmanager/detect-cloud`   | `main`  | Detect cloud provider (`azure` / `aws` / `unknown`) |
+| `docker/setup-buildx-action`   | `v3`    | Set up Docker Buildx (on GH-hosted runners)     |
+| `docker/bake-action`           | `v6`    | Execute the Bake plan (`docker-bake.json`)      |
+
+> If you push to ACR/ECR from **GH-hosted** runners, also use the appropriate **login** steps before invoking this action.
+
+---
+
+## 🧯 Troubleshooting
+
+- **Files changed earlier aren’t in the build:** Ensure Bake runs with **`source: .`** (this action does).
+- **`unknown` provider on GH-hosted:** Expected; caching falls back based on `push`.
+- **OOMKilled / disk errors:** Increase sidecar **memory/CPU**, **PVC** size, or split targets into **two Bake groups** to reduce concurrency.
+- **ECR push denied:** Verify Pod/instance role or AWS keys allow `ecr:*` actions for authentication and push.
+
+---
+
+## 🧾 License
+
+MIT © 2025 Affinity7 Consulting Ltd — see `LICENSE`.

@@ -99,7 +99,11 @@ runs:
       with:
         app_id: ${{ inputs.cd_app_id }}
         private_key: ${{ inputs.cd_app_private_key }}
-        repository: ${{ inputs.cd_repo }}
+        installation_retrieval_mode: repository
+        installation_retrieval_payload: ${{ inputs.cd_repo }}
+        revoke: true
+
+
 
     - name: 📂 Checkout CD repo
       uses: actions/checkout@v4

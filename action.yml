@@ -202,9 +202,10 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        REG="${{ steps.env.outputs.azure_registry }}"   # e.g., af7gitops.azurecr.io
-        NAME="${REG%%.*}"                               # -> af7gitops
-        az acr login --name "$NAME"
+        REG="${{ steps.env.outputs.azure_registry }}"
+        NAME="${REG%%.*}"
+        TOKEN=$(az acr login - name "$NAME" --expose-token -o tsv --query accessToken)
+        echo $TOKEN | docker login "$NAME" --username 00000000–0000–0000–0000–000000000000 --password-stdin
 
     - name: 📦 Install AWS CLI (if pushing to AWS)
       if: inputs.push == 'aws' || inputs.push == 'both'

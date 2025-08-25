@@ -154,10 +154,6 @@ runs:
     - name: 🔐 Azure login (auto)
       if: inputs.push == 'azure' || inputs.push == 'both'
       shell: bash
-      env:
-        AZURE_CLIENT_ID: ${{ inputs.azure_client_id }}
-        AZURE_CLIENT_SECRET: ${{ inputs.azure_client_secret }}
-        AZURE_TENANT_ID: ${{ inputs.azure_tenant_id }}
       run: |
         set -euo pipefail
         login_done=0
@@ -181,16 +177,20 @@ runs:
           login_done=1
         fi
 
-        # 3) Client secret fallback
-        if [ "$login_done" -eq 0 ] && [ -n "${AZURE_CLIENT_ID:-}" ] && [ -n "${AZURE_CLIENT_SECRET:-}" ] && [ -n "${AZURE_TENANT_ID:-}" ]; then
-          echo "Using Azure client secret"
+        # 3) Client secret fallback (use workflow inputs directly; no env vars)
+        if [ "$login_done" -eq 0 ] && \
+          [ -n '${{ inputs.azure_client_id }}' ] && \
+          [ -n '${{ inputs.azure_client_secret }}' ] && \
+          [ -n '${{ inputs.azure_tenant_id }}' ]; then
+          echo "Using Azure client secret (inputs)"
           az login --service-principal \
-            --username "$AZURE_CLIENT_ID" \
-            --password "$AZURE_CLIENT_SECRET" \
-            --tenant   "$AZURE_TENANT_ID" \
+            --username '${{ inputs.azure_client_id }}' \
+            --password '${{ inputs.azure_client_secret }}' \
+            --tenant   '${{ inputs.azure_tenant_id }}' \
             --allow-no-subscriptions
           login_done=1
         fi
+
 
         if [ "$login_done" -eq 0 ]; then
           echo "❌ No Azure auth method available (WI/MSI/secret). Set AZURE_CLIENT_ID[/SECRET]/AZURE_TENANT_ID or run on AKS/VM with identity." >&2

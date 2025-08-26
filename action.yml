@@ -116,7 +116,9 @@ runs:
       with:
         script: |
           const fs = require('fs');
-          const cfg = JSON.parse(fs.readFileSync('cd/config/env-map.json', 'utf8'));
+          const cfg = JSON.parse(
+            fs.readFileSync(path.join(process.env.GITHUB_WORKSPACE, 'cd/config/env-map.json'), 'utf8')
+          );
           core.setOutput('aws_registry',   cfg.build.aws_default_container_registry);
           core.setOutput('azure_registry', cfg.build.azure_default_container_registry);
 

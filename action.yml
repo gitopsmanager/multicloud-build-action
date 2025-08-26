@@ -572,30 +572,26 @@ runs:
             const name = `t${i}`;
             const tags = [];
 
-            if ((PUSH === 'aws' || PUSH === 'both') && AWS) {
-              TAGS_TO_USE.forEach(t => tags.push(`${AWS}/${it.image_name}:${t}`));
-            }
-            if ((PUSH === 'azure' || PUSH === 'both') && AZ) {
-              TAGS_TO_USE.forEach(t => tags.push(`${AZ}/${it.image_name}:${t}`));
-            }
-            if (PUSH === 'none' && it.image_name) {
-              TAGS_TO_USE.forEach(t => tags.push(`${it.image_name}:${t}`)); // local tags
-            }
+            if ((PUSH === 'aws' || PUSH === 'both') && AWS) TAGS_TO_USE.forEach(t => tags.push(`${AWS}/${it.image_name}:${t}`));
+            if ((PUSH === 'azure' || PUSH === 'both') && AZ) TAGS_TO_USE.forEach(t => tags.push(`${AZ}/${it.image_name}:${t}`));
+            if (PUSH === 'none' && it.image_name)           TAGS_TO_USE.forEach(t => tags.push(`${it.image_name}:${t}`));
 
-            // Resolve context/dockerfile relative to $GITHUB_WORKSPACE
-            const ctxRel = it.context || '.';
-            const ctxAbs = path.isAbsolute(ctxRel) ? ctxRel : path.join(ROOT, ctxRel);
-            const dfRel  = it.build_file || 'Dockerfile';
-            const dfAbs  = path.isAbsolute(dfRel) ? dfRel : path.join(ctxAbs, dfRel);
+            // Context: if relative -> join with $GITHUB_WORKSPACE
+            const ctxInput = it.context || '.';
+            const ctxPath  = path.isAbsolute(ctxInput) ? ctxInput : path.join(ROOT, ctxInput);
+
+            // Dockerfile: if relative -> join with $GITHUB_WORKSPACE (do NOT base on context)
+            const dfInput  = it.build_file || 'Dockerfile';
+            const dfPath   = path.isAbsolute(dfInput) ? dfInput : path.join(ROOT, dfInput);
 
             target[name] = {
-              context:   toPosix(ctxAbs),
-              dockerfile: toPosix(dfAbs),
+              context:   toPosix(ctxPath),
+              dockerfile: toPosix(dfPath),
               tags
             };
 
-            if (it.cacheFrom && it.cacheFrom.length) target[name]['cache-from'] = it.cacheFrom;
-            if (it.cacheTo && it.cacheTo.length)     target[name]['cache-to']   = it.cacheTo;
+            if (it.cacheFrom?.length) target[name]['cache-from'] = it.cacheFrom;
+            if (it.cacheTo?.length)   target[name]['cache-to']   = it.cacheTo;
 
             targets.push(name);
           });
@@ -605,6 +601,7 @@ runs:
           core.startGroup('docker-bake.json');
           core.info(fs.readFileSync('docker-bake.json','utf8'));
           core.endGroup();
+
 
 
     # Bake with live workspace (includes files generated earlier)

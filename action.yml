@@ -112,52 +112,46 @@ runs:
         token: ${{ steps.generate_token.outputs.token }}
         path: cd
 
-    - name: 📑 Load environment config
-      id: env
-      uses: actions/github-script@v7
-      with:
-        script: |
-          const fs = require('fs');
-          const cfg = JSON.parse(fs.readFileSync('cd/config/env-map.json', 'utf8'));
-          core.setOutput('aws_registry',   cfg.build.aws_default_container_registry);
-          core.setOutput('azure_registry', cfg.build.azure_default_container_registry);
 
-
-    - name: 🔐 ACR login via REST (github-script)
+    - name: 🔐 ACR login via REST (WI → MSI → secret; no az)
       if: ${{ inputs.push == 'azure' || inputs.push == 'both' }}
       uses: actions/github-script@v7
       env:
+        # Your registry host, e.g. "af7gitops.azurecr.io"
         AZURE_REGISTRY: ${{ steps.env.outputs.azure_registry }}
-        AZURE_FEDERATED_TOKEN_FILE: ${{ env.AZURE_FEDERATED_TOKEN_FILE }}
-        AZURE_CLIENT_ID: ${{ env.AZURE_CLIENT_ID }}
-        AZURE_TENANT_ID: ${{ env.AZURE_TENANT_ID }}
+        # Optional client-secret fallback (only if you support it)
         AAD_CLIENT_ID:     ${{ inputs.azure_client_id }}
         AAD_CLIENT_SECRET: ${{ inputs.azure_client_secret }}
         AAD_TENANT_ID:     ${{ inputs.azure_tenant_id }}
       with:
         script: |
           const fs = require('fs');
-          const {spawnSync} = require('child_process');
           const fetch = global.fetch;
+          const { spawnSync } = require('child_process');
 
           const REG = process.env.AZURE_REGISTRY;
           if (!REG) throw new Error('AZURE_REGISTRY missing');
 
           async function postForm(url, form) {
             const body = new URLSearchParams(form);
-            const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body});
-            if (!r.ok) throw new Error(`HTTP ${r.status} ${url}`);
+            const r = await fetch(url, { method: 'POST', headers: {'Content-Type':'application/x-www-form-urlencoded'}, body });
+            if (!r.ok) throw new Error(`HTTP ${r.status} ${url}: ${await r.text()}`);
             return await r.json();
           }
+          const b64url = s => {
+            s = s.replace(/-/g,'+').replace(/_/g,'/'); const pad = s.length % 4; if (pad) s += '='.repeat(4-pad);
+            return Buffer.from(s, 'base64').toString();
+          };
 
-          let aadToken = null, tenant = process.env.AZURE_TENANT_ID || '';
+          let aadToken = null;
+          let tenant = process.env.AZURE_TENANT_ID || '';
 
-          // 1) WI
+          // --- 1) AKS Workload Identity (token file + client_id + tenant) ---
           const wiFile = process.env.AZURE_FEDERATED_TOKEN_FILE;
           if (!aadToken && wiFile && fs.existsSync(wiFile) &&
               process.env.AZURE_CLIENT_ID && process.env.AZURE_TENANT_ID) {
             core.info('Using AKS Workload Identity');
-            const wi = fs.readFileSync(wiFile,'utf8').trim();
+            const wi = fs.readFileSync(wiFile, 'utf8').trim();
             const res = await postForm(`https://login.microsoftonline.com/${process.env.AZURE_TENANT_ID}/oauth2/v2.0/token`, {
               client_id: process.env.AZURE_CLIENT_ID,
               grant_type: 'client_credentials',
@@ -166,9 +160,10 @@ runs:
               client_assertion: wi,
             });
             aadToken = res.access_token;
+            tenant = process.env.AZURE_TENANT_ID;
           }
 
-          // 2) MSI via IMDS
+          // --- 2) Node MSI (IMDS). UAMI if AZURE_CLIENT_ID is set; else SAI ---
           if (!aadToken) {
             core.info('Trying IMDS (MSI)');
             const params = new URLSearchParams({
@@ -178,21 +173,22 @@ runs:
             if (process.env.AZURE_CLIENT_ID) params.set('client_id', process.env.AZURE_CLIENT_ID);
             try {
               const r = await fetch(`http://169.254.169.254/metadata/identity/oauth2/token?${params}`, {
-                headers: {'Metadata':'true'}, timeout: 1000
+                headers: { 'Metadata': 'true' }
               });
               if (r.ok) {
                 const j = await r.json();
                 aadToken = j.access_token;
                 // derive tenant from tid claim
-                const payload = JSON.parse(Buffer.from(aadToken.split('.')[1].replace(/-/g,'+').replace(/_/g,'/'), 'base64').toString());
-                tenant = payload.tid;
+                const payload = JSON.parse(b64url(aadToken.split('.')[1]));
+                tenant = payload.tid || tenant;
+                core.info('Using Node MSI');
               }
-            } catch {}
+            } catch (_) {}
           }
 
-          // 3) Secret
+          // --- 3) Client secret fallback (service principal) ---
           if (!aadToken && process.env.AAD_CLIENT_ID && process.env.AAD_CLIENT_SECRET && process.env.AAD_TENANT_ID) {
-            core.info('Using Client Credentials (secret)');
+            core.info('Using Client Credentials (secret fallback)');
             const res = await postForm(`https://login.microsoftonline.com/${process.env.AAD_TENANT_ID}/oauth2/v2.0/token`, {
               client_id: process.env.AAD_CLIENT_ID,
               client_secret: process.env.AAD_CLIENT_SECRET,
@@ -203,31 +199,39 @@ runs:
             tenant = process.env.AAD_TENANT_ID;
           }
 
-          if (!aadToken) throw new Error('No Azure auth available');
+          if (!aadToken) throw new Error('No Azure auth available (WI/MSI/secret)');
 
-          // Exchange with ACR
+          core.setSecret(aadToken);
+
+          // --- ACR OAuth2: AAD access_token -> refresh_token ---
           const refresh = await postForm(`https://${REG}/oauth2/exchange`, {
             service: REG,
             tenant,
             grant_type: 'access_token',
             access_token: aadToken
           });
+          const refreshToken = refresh.refresh_token;
+          if (!refreshToken) throw new Error('Failed to get ACR refresh_token');
+          core.setSecret(refreshToken);
 
+          // --- ACR OAuth2: refresh_token -> access_token with push/pull scope ---
+          // Use a wildcard so any repo you push in this job is authorized.
           const access = await postForm(`https://${REG}/oauth2/token`, {
             service: REG,
             grant_type: 'refresh_token',
-            refresh_token: refresh.refresh_token,
-            scope: 'registry:catalog:*'
+            refresh_token: refreshToken,
+            scope: 'repository:*:pull,push'
           });
+          const accessToken = access.access_token;
+          if (!accessToken) throw new Error('Failed to get ACR access_token');
+          core.setSecret(accessToken);
 
-          // docker login on host
+          // Docker login on the host (BuildKit will reuse these creds)
           const p = spawnSync('docker', ['login', REG, '--username', '00000000-0000-0000-0000-000000000000', '--password-stdin'], {
-            input: access.access_token, stdio: ['pipe','inherit','inherit']
+            input: accessToken, stdio: ['pipe','inherit','inherit']
           });
           if (p.status) throw new Error(`docker login failed: ${p.status}`);
-          core.info(`Logged in to ${REG}`);
-    
-
+          core.info(`✅ Logged in to ${REG} (scope: repository:*:pull,push)`);
 
 
 

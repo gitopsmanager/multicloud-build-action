@@ -36,13 +36,9 @@ Uses **Buildx Bake** for parallel multi-image builds and reads default registrie
 
 ## 🔑 Required permissions
 
-Grant these in the **job** that calls the action:
+No additional permissions are required.  
+This action works with the default `contents: read` permission that GitHub provides to all jobs.
 
-```yaml
-permissions:
-  contents: read        # checkout
-  id-token: write       # required for Azure Workload Identity; safe to always include
-```
 
 ---
 

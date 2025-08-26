@@ -123,99 +123,114 @@ runs:
           core.setOutput('azure_registry', cfg.build.azure_default_container_registry);
 
 
-    # (optional) read WI token from file on the host and pass it in
-    - name: Read AKS Workload Identity token (if present)
-      id: wi
+    - name: 🔐 ACR login via REST (github-script)
       if: ${{ inputs.push == 'azure' || inputs.push == 'both' }}
-      shell: bash
-      run: |
-        set -euo pipefail
-        if [[ -n "${AZURE_FEDERATED_TOKEN_FILE:-}" && -f "${AZURE_FEDERATED_TOKEN_FILE}" ]]; then
-          T=$(cat "${AZURE_FEDERATED_TOKEN_FILE}")
-          echo "::add-mask::$T"
-          echo "token=$T" >> "$GITHUB_OUTPUT"
-        fi
-
-    # 🔐 Login inside azure/cli container and fetch an ACR token
-    - uses: azure/cli@v2
-      id: acr
-      if: ${{ inputs.push == 'azure' || inputs.push == 'both' }}
+      uses: actions/github-script@v7
       env:
-        # WI vars (if your pod has them)
-        WI_TOKEN:                ${{ steps.wi.outputs.token }}
-        AZURE_CLIENT_ID:         ${{ env.AZURE_CLIENT_ID }}
-        AZURE_TENANT_ID:         ${{ env.AZURE_TENANT_ID }}
-
-        # MSI/UAMI hint: if you set AZURE_CLIENT_ID in the pod, we’ll pass it to --identity --username
-        # (otherwise system-assigned is used if present on the node)
-
-        # client secret fallbacks (optional inputs)
-        AZURE_CLIENT_ID_IN:     ${{ inputs.azure_client_id }}
-        AZURE_CLIENT_SECRET_IN: ${{ inputs.azure_client_secret }}
-        AZURE_TENANT_ID_IN:     ${{ inputs.azure_tenant_id }}
-
-        AZURE_REGISTRY:         ${{ steps.env.outputs.azure_registry }}
+        AZURE_REGISTRY: ${{ steps.env.outputs.azure_registry }}
+        AZURE_FEDERATED_TOKEN_FILE: ${{ env.AZURE_FEDERATED_TOKEN_FILE }}
+        AZURE_CLIENT_ID: ${{ env.AZURE_CLIENT_ID }}
+        AZURE_TENANT_ID: ${{ env.AZURE_TENANT_ID }}
+        AAD_CLIENT_ID:     ${{ inputs.azure_client_id }}
+        AAD_CLIENT_SECRET: ${{ inputs.azure_client_secret }}
+        AAD_TENANT_ID:     ${{ inputs.azure_tenant_id }}
       with:
-        inlineScript: |
-          set -euo pipefail
-          login_done=0
+        script: |
+          const fs = require('fs');
+          const {spawnSync} = require('child_process');
+          const fetch = global.fetch;
 
-          # 1) Workload Identity (federated token)
-          if [[ -n "${WI_TOKEN:-}" && -n "${AZURE_CLIENT_ID:-}" && -n "${AZURE_TENANT_ID:-}" ]]; then
-            echo "Using AKS Workload Identity"
-            az login --service-principal \
-              --username "$AZURE_CLIENT_ID" \
-              --tenant   "$AZURE_TENANT_ID" \
-              --federated-token "$WI_TOKEN" \
-              --allow-no-subscriptions
-            login_done=1
-          fi
+          const REG = process.env.AZURE_REGISTRY;
+          if (!REG) throw new Error('AZURE_REGISTRY missing');
 
-          # 2) MSI via IMDS (node identity: UAMI if --username set, else SAI)
-          if [[ $login_done -eq 0 ]]; then
-            # quick IMDS probe (fast timeout)
-            if curl -fsS -m 1 -H "Metadata: true" \
-                "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01" >/dev/null 2>&1; then
-              echo "Using node Managed Identity (IMDS)"
-              if [[ -n "${AZURE_CLIENT_ID:-}" ]]; then
-                az login --identity --username "$AZURE_CLIENT_ID" --allow-no-subscriptions
-              else
-                az login --identity --allow-no-subscriptions
-              fi
-              login_done=1
-            fi
-          fi
+          async function postForm(url, form) {
+            const body = new URLSearchParams(form);
+            const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body});
+            if (!r.ok) throw new Error(`HTTP ${r.status} ${url}`);
+            return await r.json();
+          }
 
-          # 3) Client secret fallback
-          if [[ $login_done -eq 0 && -n "${AZURE_CLIENT_ID_IN:-}" && -n "${AZURE_CLIENT_SECRET_IN:-}" && -n "${AZURE_TENANT_ID_IN:-}" ]]; then
-            echo "Using Azure client secret (inputs)"
-            az login --service-principal \
-              --username "$AZURE_CLIENT_ID_IN" \
-              --password "$AZURE_CLIENT_SECRET_IN" \
-              --tenant   "$AZURE_TENANT_ID_IN" \
-              --allow-no-subscriptions
-            login_done=1
-          fi
+          let aadToken = null, tenant = process.env.AZURE_TENANT_ID || '';
 
-          if [[ $login_done -eq 0 ]]; then
-            echo "❌ No Azure auth available (WI/MSI/secret)." >&2
-            exit 1
-          fi
+          // 1) WI
+          const wiFile = process.env.AZURE_FEDERATED_TOKEN_FILE;
+          if (!aadToken && wiFile && fs.existsSync(wiFile) &&
+              process.env.AZURE_CLIENT_ID && process.env.AZURE_TENANT_ID) {
+            core.info('Using AKS Workload Identity');
+            const wi = fs.readFileSync(wiFile,'utf8').trim();
+            const res = await postForm(`https://login.microsoftonline.com/${process.env.AZURE_TENANT_ID}/oauth2/v2.0/token`, {
+              client_id: process.env.AZURE_CLIENT_ID,
+              grant_type: 'client_credentials',
+              scope: 'https://management.azure.com/.default',
+              client_assertion_type: 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer',
+              client_assertion: wi,
+            });
+            aadToken = res.access_token;
+          }
 
-          NAME="${AZURE_REGISTRY%%.*}"
-          TOKEN=$(az acr login --name "$NAME" --expose-token -o tsv --query accessToken)
-          echo "token=$TOKEN"  >> "$GITHUB_OUTPUT"
-          echo "server=$AZURE_REGISTRY" >> "$GITHUB_OUTPUT"
+          // 2) MSI via IMDS
+          if (!aadToken) {
+            core.info('Trying IMDS (MSI)');
+            const params = new URLSearchParams({
+              'api-version': '2018-02-01',
+              resource: 'https://management.azure.com/'
+            });
+            if (process.env.AZURE_CLIENT_ID) params.set('client_id', process.env.AZURE_CLIENT_ID);
+            try {
+              const r = await fetch(`http://169.254.169.254/metadata/identity/oauth2/token?${params}`, {
+                headers: {'Metadata':'true'}, timeout: 1000
+              });
+              if (r.ok) {
+                const j = await r.json();
+                aadToken = j.access_token;
+                // derive tenant from tid claim
+                const payload = JSON.parse(Buffer.from(aadToken.split('.')[1].replace(/-/g,'+').replace(/_/g,'/'), 'base64').toString());
+                tenant = payload.tid;
+              }
+            } catch {}
+          }
 
-    # Do the Docker login on the host so BuildKit can push
-    - name: Docker login to ACR
-      if: ${{ inputs.push == 'azure' || inputs.push == 'both' }}
-      shell: bash
-      run: |
-        set -euo pipefail
-        echo "${{ steps.acr.outputs.token }}" | docker login "${{ steps.acr.outputs.server }}" \
-          --username 00000000-0000-0000-0000-000000000000 \
-          --password-stdin
+          // 3) Secret
+          if (!aadToken && process.env.AAD_CLIENT_ID && process.env.AAD_CLIENT_SECRET && process.env.AAD_TENANT_ID) {
+            core.info('Using Client Credentials (secret)');
+            const res = await postForm(`https://login.microsoftonline.com/${process.env.AAD_TENANT_ID}/oauth2/v2.0/token`, {
+              client_id: process.env.AAD_CLIENT_ID,
+              client_secret: process.env.AAD_CLIENT_SECRET,
+              grant_type: 'client_credentials',
+              scope: 'https://management.azure.com/.default'
+            });
+            aadToken = res.access_token;
+            tenant = process.env.AAD_TENANT_ID;
+          }
+
+          if (!aadToken) throw new Error('No Azure auth available');
+
+          // Exchange with ACR
+          const refresh = await postForm(`https://${REG}/oauth2/exchange`, {
+            service: REG,
+            tenant,
+            grant_type: 'access_token',
+            access_token: aadToken
+          });
+
+          const access = await postForm(`https://${REG}/oauth2/token`, {
+            service: REG,
+            grant_type: 'refresh_token',
+            refresh_token: refresh.refresh_token,
+            scope: 'registry:catalog:*'
+          });
+
+          // docker login on host
+          const p = spawnSync('docker', ['login', REG, '--username', '00000000-0000-0000-0000-000000000000', '--password-stdin'], {
+            input: access.access_token, stdio: ['pipe','inherit','inherit']
+          });
+          if (p.status) throw new Error(`docker login failed: ${p.status}`);
+          core.info(`Logged in to ${REG}`);
+    
+
+
+
+
 
 
 

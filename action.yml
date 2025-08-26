@@ -123,89 +123,101 @@ runs:
           core.setOutput('azure_registry', cfg.build.azure_default_container_registry);
 
 
-
-    - name: Ensure Azure CLI (Ubuntu)
-      if: inputs.push == 'azure' || inputs.push == 'both'
+    # (optional) read WI token from file on the host and pass it in
+    - name: Read AKS Workload Identity token (if present)
+      id: wi
+      if: ${{ inputs.push == 'azure' || inputs.push == 'both' }}
       shell: bash
       run: |
         set -euo pipefail
-
-        if command -v az >/dev/null 2>&1; then
-          echo "✅ Azure CLI found"
-          az version
-          exit 0
+        if [[ -n "${AZURE_FEDERATED_TOKEN_FILE:-}" && -f "${AZURE_FEDERATED_TOKEN_FILE}" ]]; then
+          T=$(cat "${AZURE_FEDERATED_TOKEN_FILE}")
+          echo "::add-mask::$T"
+          echo "token=$T" >> "$GITHUB_OUTPUT"
         fi
 
-        if command -v apt-get >/dev/null 2>&1; then
-          SUDO=""
-          if [ "$(id -u)" -ne 0 ]; then SUDO="sudo"; fi
-          echo "ℹ️ Installing Azure CLI via apt (Ubuntu)..."
-          curl -sL https://aka.ms/InstallAzureCLIDeb | $SUDO bash
-          echo "✅ Azure CLI installed"
-          az version
-        else
-          echo "❌ apt-get not found — this step is Ubuntu-only." >&2
-          exit 1
-        fi
+    # 🔐 Login inside azure/cli container and fetch an ACR token
+    - uses: azure/cli@v2
+      id: acr
+      if: ${{ inputs.push == 'azure' || inputs.push == 'both' }}
+      env:
+        # WI vars (if your pod has them)
+        WI_TOKEN:                ${{ steps.wi.outputs.token }}
+        AZURE_CLIENT_ID:         ${{ env.AZURE_CLIENT_ID }}
+        AZURE_TENANT_ID:         ${{ env.AZURE_TENANT_ID }}
 
+        # MSI/UAMI hint: if you set AZURE_CLIENT_ID in the pod, we’ll pass it to --identity --username
+        # (otherwise system-assigned is used if present on the node)
 
+        # client secret fallbacks (optional inputs)
+        AZURE_CLIENT_ID_IN:     ${{ inputs.azure_client_id }}
+        AZURE_CLIENT_SECRET_IN: ${{ inputs.azure_client_secret }}
+        AZURE_TENANT_ID_IN:     ${{ inputs.azure_tenant_id }}
 
-    # 🔐 Azure login (auto: WI → MSI → secret). No GitHub OIDC needed.
-    - name: 🔐 Azure login (auto)
-      if: inputs.push == 'azure' || inputs.push == 'both'
+        AZURE_REGISTRY:         ${{ steps.env.outputs.azure_registry }}
+      with:
+        inlineScript: |
+          set -euo pipefail
+          login_done=0
+
+          # 1) Workload Identity (federated token)
+          if [[ -n "${WI_TOKEN:-}" && -n "${AZURE_CLIENT_ID:-}" && -n "${AZURE_TENANT_ID:-}" ]]; then
+            echo "Using AKS Workload Identity"
+            az login --service-principal \
+              --username "$AZURE_CLIENT_ID" \
+              --tenant   "$AZURE_TENANT_ID" \
+              --federated-token "$WI_TOKEN" \
+              --allow-no-subscriptions
+            login_done=1
+          fi
+
+          # 2) MSI via IMDS (node identity: UAMI if --username set, else SAI)
+          if [[ $login_done -eq 0 ]]; then
+            # quick IMDS probe (fast timeout)
+            if curl -fsS -m 1 -H "Metadata: true" \
+                "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01" >/dev/null 2>&1; then
+              echo "Using node Managed Identity (IMDS)"
+              if [[ -n "${AZURE_CLIENT_ID:-}" ]]; then
+                az login --identity --username "$AZURE_CLIENT_ID" --allow-no-subscriptions
+              else
+                az login --identity --allow-no-subscriptions
+              fi
+              login_done=1
+            fi
+          fi
+
+          # 3) Client secret fallback
+          if [[ $login_done -eq 0 && -n "${AZURE_CLIENT_ID_IN:-}" && -n "${AZURE_CLIENT_SECRET_IN:-}" && -n "${AZURE_TENANT_ID_IN:-}" ]]; then
+            echo "Using Azure client secret (inputs)"
+            az login --service-principal \
+              --username "$AZURE_CLIENT_ID_IN" \
+              --password "$AZURE_CLIENT_SECRET_IN" \
+              --tenant   "$AZURE_TENANT_ID_IN" \
+              --allow-no-subscriptions
+            login_done=1
+          fi
+
+          if [[ $login_done -eq 0 ]]; then
+            echo "❌ No Azure auth available (WI/MSI/secret)." >&2
+            exit 1
+          fi
+
+          NAME="${AZURE_REGISTRY%%.*}"
+          TOKEN=$(az acr login --name "$NAME" --expose-token -o tsv --query accessToken)
+          echo "token=$TOKEN"  >> "$GITHUB_OUTPUT"
+          echo "server=$AZURE_REGISTRY" >> "$GITHUB_OUTPUT"
+
+    # Do the Docker login on the host so BuildKit can push
+    - name: Docker login to ACR
+      if: ${{ inputs.push == 'azure' || inputs.push == 'both' }}
       shell: bash
       run: |
         set -euo pipefail
-        login_done=0
-
-        # 1) AKS Workload Identity (token file)
-        if [ -n "${AZURE_FEDERATED_TOKEN_FILE:-}" ] && [ -n "${AZURE_CLIENT_ID:-}" ] && [ -n "${AZURE_TENANT_ID:-}" ]; then
-          echo "Using AKS Workload Identity"
-          az login --service-principal \
-            --username "$AZURE_CLIENT_ID" \
-            --tenant   "$AZURE_TENANT_ID" \
-            --federated-token "$(cat "$AZURE_FEDERATED_TOKEN_FILE")" \
-            --allow-no-subscriptions
-          login_done=1
-        fi
-
-        # 2) Node MSI (Azure VM/VMSS)
-        if [ "$login_done" -eq 0 ] && curl -fsS -m 1 -H "Metadata: true" \
-             "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01" >/dev/null 2>&1; then
-          echo "Using node Managed Identity (MSI)"
-          az login --identity ${AZURE_CLIENT_ID:+--username "$AZURE_CLIENT_ID"} --allow-no-subscriptions
-          login_done=1
-        fi
-
-        # 3) Client secret fallback (use workflow inputs directly; no env vars)
-        if [ "$login_done" -eq 0 ] && \
-          [ -n '${{ inputs.azure_client_id }}' ] && \
-          [ -n '${{ inputs.azure_client_secret }}' ] && \
-          [ -n '${{ inputs.azure_tenant_id }}' ]; then
-          echo "Using Azure client secret (inputs)"
-          az login --service-principal \
-            --username '${{ inputs.azure_client_id }}' \
-            --password '${{ inputs.azure_client_secret }}' \
-            --tenant   '${{ inputs.azure_tenant_id }}' \
-            --allow-no-subscriptions
-          login_done=1
-        fi
+        echo "${{ steps.acr.outputs.token }}" | docker login "${{ steps.acr.outputs.server }}" \
+          --username 00000000-0000-0000-0000-000000000000 \
+          --password-stdin
 
 
-        if [ "$login_done" -eq 0 ]; then
-          echo "❌ No Azure auth method available (WI/MSI/secret). Set AZURE_CLIENT_ID[/SECRET]/AZURE_TENANT_ID or run on AKS/VM with identity." >&2
-          exit 1
-        fi
-
-    - name: 🔐 ACR Login (if pushing to Azure)
-      if: inputs.push == 'azure' || inputs.push == 'both'
-      shell: bash
-      run: |
-        set -euo pipefail
-        REG="${{ steps.env.outputs.azure_registry }}"
-        NAME="${REG%%.*}" 
-        TOKEN=$(az acr login --name "$NAME" --expose-token -o tsv --query accessToken)
-        echo $TOKEN | docker login "${{ steps.env.outputs.azure_registry }}" --username 00000000-0000-0000-0000-000000000000 --password-stdin
 
     - name: 📦 Install AWS CLI (if pushing to AWS)
       if: inputs.push == 'aws' || inputs.push == 'both'

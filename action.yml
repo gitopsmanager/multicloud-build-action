@@ -22,7 +22,7 @@ inputs:
     required: false
     type: string
   path:
-    description: "Path to the build context"
+    description: "Path to the build context - full path or relative to $GITHUB_WORKSPACE."
     required: false
     default: "."
   image:
@@ -33,7 +33,7 @@ inputs:
     required: false
     default: ""
   build_file:
-    description: "Full path to the Dockerfile (relative to context)"
+    description: "Dockerfile - full path or relative to $GITHUB_WORKSPACE."
     required: false
     default: "Dockerfile"
   extra_args:

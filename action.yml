@@ -112,6 +112,15 @@ runs:
         token: ${{ steps.generate_token.outputs.token }}
         path: cd
 
+    - name: 📑 Load environment config
+      id: env
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs');
+          const cfg = JSON.parse(fs.readFileSync('cd/config/env-map.json', 'utf8'));
+          core.setOutput('aws_registry',   cfg.build.aws_default_container_registry);
+          core.setOutput('azure_registry', cfg.build.azure_default_container_registry);
 
     - name: 🔐 ACR login via REST (WI → MSI → secret; no az)
       if: ${{ inputs.push == 'azure' || inputs.push == 'both' }}
@@ -232,6 +241,7 @@ runs:
           });
           if (p.status) throw new Error(`docker login failed: ${p.status}`);
           core.info(`✅ Logged in to ${REG} (scope: repository:*:pull,push)`);
+
 
 
 

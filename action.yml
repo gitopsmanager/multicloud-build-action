@@ -135,6 +135,7 @@ runs:
       with:
         script: |
           const fs = require('fs');
+          const path = require('path');
           const fetch = global.fetch;
           const { spawnSync } = require('child_process');
 

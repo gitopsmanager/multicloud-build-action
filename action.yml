@@ -117,7 +117,7 @@ runs:
         script: |
           const fs = require('fs');
           const path = require('path');
-          
+
           const cfg = JSON.parse(
             fs.readFileSync(path.join(process.env.GITHUB_WORKSPACE, 'cd/config/env-map.json'), 'utf8')
           );
@@ -552,10 +552,14 @@ runs:
       with:
         script: |
           const fs = require('fs');
+          const path = require('path');
+
           const items = JSON.parse(process.env.ITEMS || '[]');
           const PUSH  = (process.env.PUSH || 'none').toLowerCase();
           const AWS   = process.env.AWS_REG || '';
           const AZ    = process.env.AZ_REG  || '';
+          const ROOT  = process.env.GITHUB_WORKSPACE || process.cwd();
+          const toPosix = p => p.replace(/\\/g, '/');
 
           // Always present for both workflow_dispatch and triggered runs
           const RUN_TAG  = process.env.GITHUB_RUN_ID;
@@ -578,11 +582,18 @@ runs:
               TAGS_TO_USE.forEach(t => tags.push(`${it.image_name}:${t}`)); // local tags
             }
 
+            // Resolve context/dockerfile relative to $GITHUB_WORKSPACE
+            const ctxRel = it.context || '.';
+            const ctxAbs = path.isAbsolute(ctxRel) ? ctxRel : path.join(ROOT, ctxRel);
+            const dfRel  = it.build_file || 'Dockerfile';
+            const dfAbs  = path.isAbsolute(dfRel) ? dfRel : path.join(ctxAbs, dfRel);
+
             target[name] = {
-              context: it.context,
-              dockerfile: `${it.context}/${it.build_file}`,
+              context:   toPosix(ctxAbs),
+              dockerfile: toPosix(dfAbs),
               tags
             };
+
             if (it.cacheFrom && it.cacheFrom.length) target[name]['cache-from'] = it.cacheFrom;
             if (it.cacheTo && it.cacheTo.length)     target[name]['cache-to']   = it.cacheTo;
 

@@ -363,50 +363,62 @@ runs:
           core.setOutput('items', JSON.stringify(out));
           core.setOutput('count', String(out.length));
 
-    # Generate bake file; (optionally) push to both registries in one build
     - name: generate-bake
       id: bakefile
       if: ${{ steps.enhance.outputs.count != '0' }}
       uses: actions/github-script@v7
       env:
-        ITEMS:   ${{ steps.enhance.outputs.items }}
-        PUSH:    ${{ inputs.push }}
-        AWS_REG: ${{ steps.env.outputs.aws_registry }}
-        AZ_REG:  ${{ steps.env.outputs.azure_registry }}
-        TAG:     ${{ github.sha }}   # or another tag source
+        ITEMS:    ${{ steps.enhance.outputs.items }}
+        PUSH:     ${{ inputs.push }}
+        AWS_REG:  ${{ steps.env.outputs.aws_registry }}
+        AZ_REG:   ${{ steps.env.outputs.azure_registry }}
+        USER_TAG: ${{ inputs.tag }}   # optional; may be empty
       with:
         script: |
           const fs = require('fs');
-          const items = JSON.parse(process.env.ITEMS);
+          const items = JSON.parse(process.env.ITEMS || '[]');
           const PUSH  = (process.env.PUSH || 'none').toLowerCase();
           const AWS   = process.env.AWS_REG || '';
           const AZ    = process.env.AZ_REG  || '';
-          const TAG   = (process.env.TAG || '').slice(0,12) || 'dev';
+
+          // Always present for both workflow_dispatch and triggered runs
+          const RUN_TAG  = process.env.GITHUB_RUN_ID;
+          const USER_TAG = process.env.USER_TAG || '';
+          const TAGS_TO_USE = USER_TAG ? [RUN_TAG, USER_TAG] : [RUN_TAG];
 
           const target = {}, targets = [];
+
           items.forEach((it, i) => {
             const name = `t${i}`;
             const tags = [];
 
-            // Build once, push to both registries if requested
-            if (PUSH === 'aws' || PUSH === 'both')   tags.push(`${AWS}/${it.image_name}:${TAG}`);
-            if (PUSH === 'azure' || PUSH === 'both') tags.push(`${AZ}/${it.image_name}:${TAG}`);
-            if (PUSH === 'none' && it.image_name)    tags.push(`${it.image_name}:${TAG}`); // local tag only
+            if ((PUSH === 'aws' || PUSH === 'both') && AWS) {
+              TAGS_TO_USE.forEach(t => tags.push(`${AWS}/${it.image_name}:${t}`));
+            }
+            if ((PUSH === 'azure' || PUSH === 'both') && AZ) {
+              TAGS_TO_USE.forEach(t => tags.push(`${AZ}/${it.image_name}:${t}`));
+            }
+            if (PUSH === 'none' && it.image_name) {
+              TAGS_TO_USE.forEach(t => tags.push(`${it.image_name}:${t}`)); // local tags
+            }
 
             target[name] = {
               context: it.context,
               dockerfile: `${it.context}/${it.build_file}`,
               tags
             };
-            if (it.cacheFrom?.length) target[name]['cache-from'] = it.cacheFrom;
-            if (it.cacheTo?.length)   target[name]['cache-to']   = it.cacheTo;
+            if (it.cacheFrom && it.cacheFrom.length) target[name]['cache-from'] = it.cacheFrom;
+            if (it.cacheTo && it.cacheTo.length)     target[name]['cache-to']   = it.cacheTo;
 
             targets.push(name);
           });
 
           const bake = { group: { default: { targets } }, target };
           fs.writeFileSync('docker-bake.json', JSON.stringify(bake, null, 2));
-          core.startGroup('docker-bake.json'); core.info(fs.readFileSync('docker-bake.json','utf8')); core.endGroup();
+          core.startGroup('docker-bake.json');
+          core.info(fs.readFileSync('docker-bake.json','utf8'));
+          core.endGroup();
+
 
     # Bake with live workspace (includes files generated earlier)
     - name: bake

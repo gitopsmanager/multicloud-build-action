@@ -244,56 +244,189 @@ runs:
 
 
 
-
-
-
-
-    - name: 📦 Install AWS CLI (if pushing to AWS)
-      if: inputs.push == 'aws' || inputs.push == 'both'
+    # ── Derive AWS account & region from your registry host ───────────────────────
+    - name: Derive AWS account/region from registry
+      id: awsreg
+      if: ${{ inputs.push == 'aws' || inputs.push == 'both' }}
       shell: bash
-      run: |
-        set -e
-        if ! command -v aws >/dev/null 2>&1; then
-          curl -sL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip
-          unzip -q awscliv2.zip
-          sudo ./aws/install
-        fi
-
-    - name: ✅ Ensure ECR repository exists
-      if: inputs.push == 'aws' || inputs.push == 'both'
-      shell: bash
-      env:
-        AWS_ACCESS_KEY_ID: ${{ inputs.aws_access_key_id }}
-        AWS_SECRET_ACCESS_KEY: ${{ inputs.aws_secret_access_key }}
       run: |
         set -euo pipefail
-        REG="${{ steps.env.outputs.aws_registry }}"            # e.g. 123456789012.dkr.ecr.eu-west-1.amazonaws.com
-        REPO="${{ inputs.image }}"                             # e.g. myteam/myapp
-        REGION="$(echo "$REG" | cut -d. -f4)"                  # -> eu-west-1
-        export AWS_DEFAULT_REGION="$REGION"
-        if ! aws ecr describe-repositories --repository-names "$REPO" --region "$REGION" >/dev/null 2>&1; then
-          echo "Creating ECR repository '$REPO' in $REGION"
-          aws ecr create-repository \
-            --repository-name "$REPO" \
-            --image-scanning-configuration scanOnPush=true \
-            --region "$REGION" >/dev/null || echo "Repo already exists, continuing."
-        else
-          echo "ECR repository '$REPO' already exists."
-        fi
+        REG="${{ steps.env.outputs.aws_registry }}"   # e.g. 123456789012.dkr.ecr.eu-west-1.amazonaws.com
+        [[ -n "$REG" ]] || { echo "aws_registry missing"; exit 1; }
+        ACCOUNT="${REG%%.*}"
+        REGION="$(echo "$REG" | cut -d. -f4)"         # eu-west-1
+        echo "account=$ACCOUNT" >> "$GITHUB_OUTPUT"
+        echo "region=$REGION"  >> "$GITHUB_OUTPUT"
 
-    - name: 🔐 ECR login
-      if: inputs.push == 'aws' || inputs.push == 'both'
-      shell: bash
+    # ── Ensure the ECR repository exists (no aws cli; SigV4 via github-script) ────
+    - name: Ensure ECR repository exists
+      if: ${{ inputs.push == 'aws' || inputs.push == 'both' }}
+      uses: actions/github-script@v7
       env:
-        AWS_ACCESS_KEY_ID: ${{ inputs.aws_access_key_id }}
+        AWS_REGION:  ${{ steps.awsreg.outputs.region }}
+        ECR_REPO:    ${{ inputs.image }}                     # e.g. team/app
+        # optional static keys — use NON-standard names so we don't clobber identity
+        STATIC_AWS_ACCESS_KEY_ID:     ${{ inputs.aws_access_key_id }}
+        STATIC_AWS_SECRET_ACCESS_KEY: ${{ inputs.aws_secret_access_key }}
+        STATIC_AWS_SESSION_TOKEN:     ${{ inputs.aws_session_token }}
+      with:
+        script: |
+          const crypto = require('crypto');
+          const fetch = global.fetch;
+
+          const region = process.env.AWS_REGION;
+          const repo   = process.env.ECR_REPO;
+          if (!region) throw new Error('AWS_REGION missing');
+          if (!repo)   throw new Error('ECR_REPO missing');
+
+          const host = `api.ecr.${region}.amazonaws.com`;
+
+          const sha256Hex = s => crypto.createHash('sha256').update(s,'utf8').digest('hex');
+          const hmac = (k,d) => crypto.createHmac('sha256', k).update(d,'utf8').digest();
+          const hmacHex = (k,d) => crypto.createHmac('sha256', k).update(d,'utf8').digest('hex');
+
+          async function timedFetch(url, opts = {}, ms = 1200) {
+            const ac = new AbortController(); const t = setTimeout(()=>ac.abort(), ms);
+            try { return await fetch(url, { ...opts, signal: ac.signal }); }
+            finally { clearTimeout(t); }
+          }
+
+          async function getPodIdentityCreds() {
+            const full = process.env.AWS_CONTAINER_CREDENTIALS_FULL_URI;
+            const rel  = process.env.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI;
+            const uri  = full || (rel ? `http://169.254.170.2${rel}` : '');
+            if (!uri) return null;
+            const headers = {};
+            if (process.env.AWS_CONTAINER_AUTHORIZATION_TOKEN)
+              headers['Authorization'] = `Bearer ${process.env.AWS_CONTAINER_AUTHORIZATION_TOKEN}`;
+            try {
+              const r = await timedFetch(uri, { headers }, 1500);
+              if (!r.ok) return null;
+              const j = await r.json();
+              return { accessKeyId: j.AccessKeyId, secretAccessKey: j.SecretAccessKey, sessionToken: j.Token };
+            } catch { return null; }
+          }
+
+          async function getImdsCreds() {
+            try {
+              const tRes = await timedFetch('http://169.254.169.254/latest/api/token', {
+                method: 'PUT', headers: {'X-aws-ec2-metadata-token-ttl-seconds':'21600'}
+              }, 900);
+              const token = tRes.ok ? await tRes.text() : '';
+              const h = token ? {'X-aws-ec2-metadata-token': token} : {};
+              const roleRes = await timedFetch('http://169.254.169.254/latest/meta-data/iam/security-credentials/', { headers: h }, 900);
+              if (!roleRes.ok) return null;
+              const role = (await roleRes.text()).trim();
+              if (!role) return null;
+              const credRes = await timedFetch(`http://169.254.169.254/latest/meta-data/iam/security-credentials/${role}`, { headers: h }, 900);
+              if (!credRes.ok) return null;
+              const c = await credRes.json();
+              return { accessKeyId: c.AccessKeyId, secretAccessKey: c.SecretAccessKey, sessionToken: c.Token };
+            } catch { return null; }
+          }
+
+          function getStaticCreds() {
+            const ak = process.env.STATIC_AWS_ACCESS_KEY_ID || '';
+            const sk = process.env.STATIC_AWS_SECRET_ACCESS_KEY || '';
+            const st = process.env.STATIC_AWS_SESSION_TOKEN || '';
+            return (ak && sk) ? { accessKeyId: ak, secretAccessKey: sk, sessionToken: st || undefined } : null;
+          }
+
+          async function ecrCall(target, payload, creds) {
+            const body = JSON.stringify(payload);
+            const now = new Date();
+            const amzdate = now.toISOString().replace(/[-:]/g,'').replace(/\.\d{3}Z$/,'Z'); // YYYYMMDDTHHMMSSZ
+            const datestamp = amzdate.slice(0,8);
+            const service = 'ecr';
+
+            const hdrs = {
+              'content-type': 'application/x-amz-json-1.1',
+              'host': host,
+              'x-amz-date': amzdate,
+              'x-amz-target': `AmazonEC2ContainerRegistry_V20150921.${target}`,
+            };
+            if (creds.sessionToken) hdrs['x-amz-security-token'] = creds.sessionToken;
+
+            const signedNames = Object.keys(hdrs).sort();
+            const canonicalHeaders = signedNames.map(k => `${k}:${hdrs[k]}\n`).join('');
+            const signedHeaders = signedNames.join(';');
+            const canonicalRequest = ['POST','/','',canonicalHeaders,signedHeaders,sha256Hex(body)].join('\n');
+
+            const algorithm = 'AWS4-HMAC-SHA256';
+            const scope = `${datestamp}/${region}/${service}/aws4_request`;
+            const stringToSign = [algorithm, amzdate, scope, sha256Hex(canonicalRequest)].join('\n');
+
+            const kDate = hmac('AWS4' + creds.secretAccessKey, datestamp);
+            const kRegion = hmac(kDate, region);
+            const kService = hmac(kRegion, service);
+            const kSigning = hmac(kService, 'aws4_request');
+            const signature = hmacHex(kSigning, stringToSign);
+
+            const reqHeaders = {
+              'Content-Type': 'application/x-amz-json-1.1',
+              'X-Amz-Target': hdrs['x-amz-target'],
+              'X-Amz-Date':   hdrs['x-amz-date'],
+              'Authorization': `${algorithm} Credential=${creds.accessKeyId}/${scope}, SignedHeaders=${signedHeaders}, Signature=${signature}`,
+              'Host': host
+            };
+            if (creds.sessionToken) reqHeaders['X-Amz-Security-Token'] = creds.sessionToken;
+
+            const res = await fetch(`https://${host}/`, { method:'POST', headers:reqHeaders, body });
+            const text = await res.text(); let json; try { json = JSON.parse(text); } catch {}
+            if (!res.ok) throw new Error(`ECR ${target} ${res.status} ${(res.headers.get('x-amzn-errortype')||'')} ${text}`);
+            return json;
+          }
+
+          // Resolve creds: Pod Identity → node IMDS → static keys
+          let creds = await getPodIdentityCreds();
+          if (creds) core.info('Using EKS Pod Identity credentials');
+          if (!creds) { creds = await getImdsCreds(); if (creds) core.info('Using node IMDS credentials'); }
+          if (!creds) { creds = getStaticCreds();     if (creds) core.info('Using static AWS keys'); }
+          if (!creds) throw new Error('No AWS credentials available (Pod Identity, node role, or keys)');
+
+          // Ensure repo exists
+          try {
+            await ecrCall('DescribeRepositories', { repositoryNames: [repo] }, creds);
+            core.info(`ECR repository '${repo}' already exists.`);
+          } catch (e) {
+            if (String(e.message).includes('RepositoryNotFoundException')) {
+              core.info(`Creating ECR repository '${repo}' (scanOnPush=true)`);
+              await ecrCall('CreateRepository', {
+                repositoryName: repo,
+                imageScanningConfiguration: { scanOnPush: true }
+              }, creds);
+            } else {
+              throw e;
+            }
+          }
+
+    # login with pod identity / node role
+    - uses: aws-actions/amazon-ecr-login@v2
+      name: 🔐 ECR login (identity/IMDS)
+      if: ${{ (inputs.push == 'aws' || inputs.push == 'both') && inputs.aws_access_key_id == '' }}
+      env:
+        AWS_REGION: ${{ steps.awsreg.outputs.region }}
+      with:
+        registries: ${{ steps.awsreg.outputs.account }}
+
+    # login with static keys (fallback)
+    - uses: aws-actions/amazon-ecr-login@v2
+      name: 🔐 ECR login (static keys)
+      if: ${{ (inputs.push == 'aws' || inputs.push == 'both') && inputs.aws_access_key_id != '' }}
+      env:
+        AWS_REGION:            ${{ steps.awsreg.outputs.region }}
+        AWS_ACCESS_KEY_ID:     ${{ inputs.aws_access_key_id }}
         AWS_SECRET_ACCESS_KEY: ${{ inputs.aws_secret_access_key }}
-      run: |
-        set -euo pipefail
-        REG="${{ steps.env.outputs.aws_registry }}"
-        REGION="$(echo "$REG" | cut -d. -f4)"   # parse region from registry
-        export AWS_DEFAULT_REGION="$REGION"
-        aws ecr get-login-password --region "$REGION" \
-          | docker login --username AWS --password-stdin "$REG"
+        AWS_SESSION_TOKEN:     ${{ inputs.aws_session_token }}
+      with:
+        registries: ${{ steps.awsreg.outputs.account }}
+
+
+
+
+
+
+
 
 
     - name: normalize-inputs

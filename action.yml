@@ -116,6 +116,8 @@ runs:
       with:
         script: |
           const fs = require('fs');
+          const path = require('path');
+          
           const cfg = JSON.parse(
             fs.readFileSync(path.join(process.env.GITHUB_WORKSPACE, 'cd/config/env-map.json'), 'utf8')
           );
@@ -135,7 +137,6 @@ runs:
       with:
         script: |
           const fs = require('fs');
-          const path = require('path');
           const fetch = global.fetch;
           const { spawnSync } = require('child_process');
 

@@ -156,6 +156,7 @@ Use the managed builder instead:
 ```yaml
 - uses: docker/setup-buildx-action@v3
 ```
+
 The “remote BuildKit on :12345” requirement applies only to self-hosted runners.
 ---
 

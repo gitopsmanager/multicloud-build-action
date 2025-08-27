@@ -266,16 +266,17 @@ runs:
       uses: actions/github-script@v7
       env:
         AWS_REGION:  ${{ steps.awsreg.outputs.region }}
-        ECR_REPO:    ${{ inputs.image }}  # e.g. team/app
-        # optional static keys (only used if IMDS fails)
+        ECR_REPO:    ${{ inputs.image }}
+        # optional static keys (last-resort fallback)
         STATIC_AWS_ACCESS_KEY_ID:     ${{ inputs.aws_access_key_id }}
         STATIC_AWS_SECRET_ACCESS_KEY: ${{ inputs.aws_secret_access_key }}
         STATIC_AWS_SESSION_TOKEN:     ${{ inputs.aws_session_token }}
-        # ensure IMDS calls don't go through a proxy
-        NO_PROXY: 169.254.169.254,169.254.170.2
+        # ensure no proxy for the Pod Identity/IMDS endpoints
+        NO_PROXY: 169.254.170.23,169.254.169.254
       with:
         script: |
           const crypto = require('crypto');
+          const fs = require('fs/promises');
           const fetch = global.fetch;
 
           const region = process.env.AWS_REGION;
@@ -288,52 +289,68 @@ runs:
           const sha256Hex = s => crypto.createHash('sha256').update(s,'utf8').digest('hex');
           const hmac = (k,d) => crypto.createHmac('sha256', k).update(d,'utf8').digest();
           const hmacHex = (k,d) => crypto.createHmac('sha256', k).update(d,'utf8').digest('hex');
-
           const sleep = ms => new Promise(r => setTimeout(r, ms));
-          async function timedFetch(url, opts = {}, ms = 5000) {
+          async function timedFetch(url, opts = {}, ms = 4000) {
             const ac = new AbortController(); const t = setTimeout(()=>ac.abort(), ms);
             try { return await fetch(url, { ...opts, signal: ac.signal }); }
             finally { clearTimeout(t); }
           }
 
-          // --- EKS Pod Identity via IMDS (preferred) ------------------------------
-          async function getImdsCreds() {
-            // retry a few times to give the pod identity agent time to respond
-            for (let attempt = 1; attempt <= 5; attempt++) {
-              try {
-                // IMDSv2 token
-                const tRes = await timedFetch('http://169.254.169.254/latest/api/token', {
-                  method: 'PUT',
-                  headers: {'X-aws-ec2-metadata-token-ttl-seconds':'21600'}
-                }, 2000);
-                const token = tRes.ok ? await tRes.text() : '';
-                const h = token ? {'X-aws-ec2-metadata-token': token} : {};
-
-                // role name exposed by the pod identity agent
-                const roleRes = await timedFetch('http://169.254.169.254/latest/meta-data/iam/security-credentials/', { headers: h }, 3000);
-                if (!roleRes.ok) throw new Error(`IMDS role list: ${roleRes.status}`);
-                const role = (await roleRes.text()).trim();
-                if (!role) throw new Error('IMDS role empty');
-
-                const credRes = await timedFetch(`http://169.254.169.254/latest/meta-data/iam/security-credentials/${role}`, { headers: h }, 3000);
-                if (!credRes.ok) throw new Error(`IMDS creds: ${credRes.status}`);
-                const c = await credRes.json();
-                core.info('Using EKS Pod Identity (IMDS) credentials');
-                return { accessKeyId: c.AccessKeyId, secretAccessKey: c.SecretAccessKey, sessionToken: c.Token };
-              } catch (e) {
-                if (attempt === 5) break;
-                await sleep(500 * attempt); // backoff
+          // --- CREDENTIAL SOURCES -------------------------------------------------
+          // 1) EKS Pod Identity container credential provider (169.254.170.23)
+          async function getPodIdentityCreds() {
+            const uri = process.env.AWS_CONTAINER_CREDENTIALS_FULL_URI;
+            if (!uri) return null;
+            let token = '';
+            try {
+              if (process.env.AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE) {
+                token = (await fs.readFile(process.env.AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE, 'utf8')).trim();
+              } else if (process.env.AWS_CONTAINER_AUTHORIZATION_TOKEN) {
+                token = process.env.AWS_CONTAINER_AUTHORIZATION_TOKEN;
               }
+            } catch {}
+            const headers = token ? { Authorization: `Bearer ${token}` } : {};
+            // retry a bit; the agent might not be ready instantly
+            for (let i=1; i<=5; i++) {
+              try {
+                const r = await timedFetch(uri, { headers }, 2500);
+                if (r.ok) {
+                  const j = await r.json();
+                  core.info('Using EKS Pod Identity (container credentials URI)');
+                  return { accessKeyId: j.AccessKeyId, secretAccessKey: j.SecretAccessKey, sessionToken: j.Token };
+                }
+              } catch {}
+              await sleep(300*i);
             }
             return null;
           }
 
-          // --- Static keys (explicit inputs) --------------------------------------
+          // 2) IMDS (node or agent-proxied) – secondary
+          async function getImdsCreds() {
+            try {
+              const tRes = await timedFetch('http://169.254.169.254/latest/api/token', {
+                method:'PUT', headers:{'X-aws-ec2-metadata-token-ttl-seconds':'21600'}
+              }, 1500);
+              const token = tRes.ok ? await tRes.text() : '';
+              const h = token ? {'X-aws-ec2-metadata-token': token} : {};
+              const roleRes = await timedFetch('http://169.254.169.254/latest/meta-data/iam/security-credentials/', { headers: h }, 1500);
+              if (!roleRes.ok) return null;
+              const role = (await roleRes.text()).trim();
+              if (!role) return null;
+              const credRes = await timedFetch(`http://169.254.169.254/latest/meta-data/iam/security-credentials/${role}`, { headers: h }, 1500);
+              if (!credRes.ok) return null;
+              const c = await credRes.json();
+              core.info('Using IMDS credentials');
+              return { accessKeyId: c.AccessKeyId, secretAccessKey: c.SecretAccessKey, sessionToken: c.Token };
+            } catch { return null; }
+          }
+
+          // 3) Static keys (fallback)
           function getStaticCreds() {
             const ak = process.env.STATIC_AWS_ACCESS_KEY_ID || '';
             const sk = process.env.STATIC_AWS_SECRET_ACCESS_KEY || '';
             const st = process.env.STATIC_AWS_SESSION_TOKEN || '';
-            if (ak && sk) { core.info('Using static AWS keys (fallback)'); return { accessKeyId: ak, secretAccessKey: sk, sessionToken: st || undefined }; }
+            if (ak && sk) { core.info('Using static AWS keys'); return { accessKeyId: ak, secretAccessKey: sk, sessionToken: st || undefined }; }
             return null;
           }
 
@@ -383,10 +400,11 @@ runs:
             return json;
           }
 
-          // Resolve creds: EKS Pod Identity (IMDS) → static keys
-          let creds = await getImdsCreds();
+          // Resolve creds: Pod Identity container URI → IMDS → static keys
+          let creds = await getPodIdentityCreds();
+          if (!creds) creds = await getImdsCreds();
           if (!creds) creds = getStaticCreds();
-          if (!creds) throw new Error('No AWS credentials available (EKS Pod Identity IMDS or static keys)');
+          if (!creds) throw new Error('No AWS credentials available (Pod Identity URI, IMDS, or static keys)');
 
           // Ensure repo exists
           try {
@@ -403,6 +421,7 @@ runs:
               throw e;
             }
           }
+
 
 
     # login with pod identity / node role

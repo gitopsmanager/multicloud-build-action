@@ -89,6 +89,12 @@ inputs:
 
 runs:
   using: composite
+
+  # Set a default shell for all run: steps in this job
+  defaults:
+    run:
+      shell: bash
+
   steps:
 
     - name: 🔑 Generate GitHub App token

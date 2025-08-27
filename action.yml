@@ -478,6 +478,21 @@ runs:
         docker rm -f buildkitd 2>/dev/null || true
         docker buildx rm remote-builder 2>/dev/null || true
 
+    - name: 🔍 Docker diagnostics
+      shell: bash
+      run: |
+        set -x
+        id
+        groups || true
+        which docker || true
+        echo "DOCKER_HOST=${DOCKER_HOST:-<unset>}"
+        ls -l /var/run/docker.sock || true
+        ls -l /run/user/*/docker.sock || true
+        docker context ls || true
+        (systemctl --user status docker | head -n 20) 2>/dev/null || true
+        (sudo systemctl status docker | head -n 20) 2>/dev/null || true
+
+
     - name: 🚀 Start BuildKit (privileged, cgroups, 12345->12344)
       if: "contains(runner.name, 'self-hosted')"
       shell: bash

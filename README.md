@@ -129,19 +129,16 @@ This workflow expects, **on self-hosted runners**, a BuildKit daemon (`buildkitd
 ### Self-hosted runners (required setup)
 - **Listener:** start `buildkitd` with `--addr=tcp://0.0.0.0:12345` so the runner container can reach it at `127.0.0.1:12345` (same pod network namespace).
 - **Worker:** OCI worker (common today) or containerd worker — both are supported.
-- **`RUN` commands & privilege escalation (apt, etc.):**
-  - Many Dockerfiles use `RUN` steps (e.g., `apt-get update/install`) that require BuildKit to create cgroups and perform mounts.
-  - In Kubernetes, you may need to **allow privilege escalation** for the BuildKit container so runc can join mount namespaces and set up cgroups.
-  - Pragmatic baseline for the BuildKit container:
-    - Mount `/sys/fs/cgroup` **read-write** into the container.
-    - `allowPrivilegeEscalation: true`
-    - Capabilities: `SYS_ADMIN` (add `CHOWN`, `FOWNER`, `DAC_OVERRIDE` if your `RUN` steps change ownership/permissions)
-    - Seccomp/AppArmor: permissive (e.g., **Unconfined**) or a profile that allows `mount`/namespace operations.
-  - Symptoms of missing privileges include errors like: `setns: operation not permitted`, `unable to apply cgroup configuration`, or `failed to mount rootfs component`.
-- **Sanity checks (from the runner):**
-  - Port open: `nc -zv 127.0.0.1 12345`
-  - Worker visible: `buildctl --addr tcp://127.0.0.1:12345 debug workers`
-  - Logs show: `serving grpc api on tcp://0.0.0.0:12345`
+---
+
+### Kubernetes privileges for BuildKit (self-hosted)
+
+To support Dockerfile `RUN` steps (e.g., `apt-get`) the BuildKit sidecar may need:
+- **Cgroups:** mount `/sys/fs/cgroup` **read-write** into the container.
+- **Full privilege escalation:** run the sidecar **privileged** (or at minimum `allowPrivilegeEscalation: true`).
+- **Security profiles:** use **Unconfined** for both Seccomp and AppArmor.
+- **Microsoft/AKS AppArmor annotation:** set the per-container annotation to unconfined.
+
 
 **How the workflow connects:**
 ```bash

@@ -90,11 +90,6 @@ inputs:
 runs:
   using: composite
 
-  # Set a default shell for all run: steps in this job
-  defaults:
-    run:
-      shell: bash
-
   steps:
 
     - name: 🔑 Generate GitHub App token
@@ -476,15 +471,16 @@ runs:
           core.info(`count: ${items.length}`);
           core.endGroup();
 
-    # ✅ Works on self-hosted Linux runners that have Docker available
     - name: 🧹 Clean any previous BuildKit
       if: "contains(runner.name, 'self-hosted')"
+      shell: bash
       run: |
         docker rm -f buildkitd 2>/dev/null || true
         docker buildx rm remote-builder 2>/dev/null || true
 
     - name: 🚀 Start BuildKit (privileged, cgroups, 12345->12344)
       if: "contains(runner.name, 'self-hosted')"
+      shell: bash
       run: |
         docker run -d --name buildkitd \
           --privileged \
@@ -496,11 +492,12 @@ runs:
 
     - name: 🔧 Register remote BuildKit with buildx
       if: "contains(runner.name, 'self-hosted')"
+      shell: bash
       run: |
-        # Point buildx to the host-mapped port
         docker buildx create --name remote-builder --driver remote tcp://127.0.0.1:12345
         docker buildx use remote-builder
         docker buildx inspect --bootstrap
+
    
 
 

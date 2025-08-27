@@ -273,7 +273,6 @@ runs:
         STATIC_AWS_SESSION_TOKEN:     ${{ inputs.aws_session_token }}
         # ensure IMDS calls don't go through a proxy
         NO_PROXY: 169.254.169.254,169.254.170.2
-        no_proxy: 169.254.169.254,169.254.170.2
       with:
         script: |
           const crypto = require('crypto');

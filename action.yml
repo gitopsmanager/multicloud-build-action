@@ -261,182 +261,68 @@ runs:
         echo "account=$ACCOUNT" >> "$GITHUB_OUTPUT"
         echo "region=$REGION"  >> "$GITHUB_OUTPUT"
 
+    # ── Detect Pod Identity/IMDS vs static keys ────────────────────────────────
+    - name: Detect AWS credential source
+      id: awsauth
+      if: ${{ inputs.push == 'aws' || inputs.push == 'both' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        export NO_PROXY=169.254.170.23,169.254.169.254
+
+        MODE="static"
+
+        if [ -z "${{ inputs.aws_access_key_id }}" ]; then
+          # try Pod Identity container creds
+          if [ -n "${AWS_CONTAINER_CREDENTIALS_FULL_URI:-}" ] && [ -f "${AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE:-}" ]; then
+            TOKEN="$(tr -d '\r\n' < "$AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE" || true)"
+            if [ -n "$TOKEN" ]; then
+              code=$(curl -s -o /dev/null -w '%{http_code}' \
+                -H "Authorization: Bearer $TOKEN" \
+                "$AWS_CONTAINER_CREDENTIALS_FULL_URI" || true)
+              if [ "$code" = "200" ]; then MODE="identity"; fi
+            fi
+          fi
+
+          # fallback: IMDS (node role or PI agent)
+          if [ "$MODE" != "identity" ]; then
+            tok=$(curl -s -m 2 -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' \
+              http://169.254.169.254/latest/api/token || true)
+            role=$(curl -s -m 2 ${tok:+-H "X-aws-ec2-metadata-token: $tok"} \
+              http://169.254.169.254/latest/meta-data/iam/security-credentials/ || true)
+            if [ -n "$role" ]; then MODE="identity"; fi
+          fi
+        fi
+
+        echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+
+    # ── Ensure ECR repository exists ──────────────────────────────────────────
     - name: Ensure ECR repository exists
       if: ${{ inputs.push == 'aws' || inputs.push == 'both' }}
-      uses: actions/github-script@v7
-      env:
-        AWS_REGION:  ${{ steps.awsreg.outputs.region }}
-        ECR_REPO:    ${{ inputs.image }}
-        # optional static keys (last-resort fallback)
-        STATIC_AWS_ACCESS_KEY_ID:     ${{ inputs.aws_access_key_id }}
-        STATIC_AWS_SECRET_ACCESS_KEY: ${{ inputs.aws_secret_access_key }}
-        STATIC_AWS_SESSION_TOKEN:     ${{ inputs.aws_session_token }}
-        # ensure no proxy for the Pod Identity/IMDS endpoints
-        NO_PROXY: 169.254.170.23,169.254.169.254
+      uses: aws-actions/configure-aws-credentials@v4
       with:
-        script: |
-          const crypto = require('crypto');
-          const fs = require('fs/promises');
-          const fetch = global.fetch;
+        aws-region: ${{ steps.awsreg.outputs.region }}
+        role-to-assume: ${{ steps.awsauth.outputs.mode == 'identity' && '' || '' }} # optional if using OIDC
+        aws-access-key-id:     ${{ steps.awsauth.outputs.mode == 'static' && inputs.aws_access_key_id || '' }}
+        aws-secret-access-key: ${{ steps.awsauth.outputs.mode == 'static' && inputs.aws_secret_access_key || '' }}
+        aws-session-token:     ${{ steps.awsauth.outputs.mode == 'static' && inputs.aws_session_token || '' }}
+    - run: |
+        aws ecr describe-repositories --repository-names "${{ inputs.image }}" \
+          || aws ecr create-repository --repository-name "${{ inputs.image }}" \
+            --image-scanning-configuration scanOnPush=true
 
-          const region = process.env.AWS_REGION;
-          const repo   = process.env.ECR_REPO;
-          if (!region) throw new Error('AWS_REGION missing');
-          if (!repo)   throw new Error('ECR_REPO missing');
-
-          const host = `api.ecr.${region}.amazonaws.com`;
-
-          const sha256Hex = s => crypto.createHash('sha256').update(s,'utf8').digest('hex');
-          const hmac = (k,d) => crypto.createHmac('sha256', k).update(d,'utf8').digest();
-          const hmacHex = (k,d) => crypto.createHmac('sha256', k).update(d,'utf8').digest('hex');
-          const sleep = ms => new Promise(r => setTimeout(r, ms));
-          async function timedFetch(url, opts = {}, ms = 4000) {
-            const ac = new AbortController(); const t = setTimeout(()=>ac.abort(), ms);
-            try { return await fetch(url, { ...opts, signal: ac.signal }); }
-            finally { clearTimeout(t); }
-          }
-
-          // --- CREDENTIAL SOURCES -------------------------------------------------
-          // 1) EKS Pod Identity container credential provider (169.254.170.23)
-          async function getPodIdentityCreds() {
-            const uri = process.env.AWS_CONTAINER_CREDENTIALS_FULL_URI;
-            if (!uri) return null;
-            let token = '';
-            try {
-              if (process.env.AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE) {
-                token = (await fs.readFile(process.env.AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE, 'utf8')).trim();
-              } else if (process.env.AWS_CONTAINER_AUTHORIZATION_TOKEN) {
-                token = process.env.AWS_CONTAINER_AUTHORIZATION_TOKEN;
-              }
-            } catch {}
-            const headers = token ? { Authorization: `Bearer ${token}` } : {};
-            // retry a bit; the agent might not be ready instantly
-            for (let i=1; i<=5; i++) {
-              try {
-                const r = await timedFetch(uri, { headers }, 2500);
-                if (r.ok) {
-                  const j = await r.json();
-                  core.info('Using EKS Pod Identity (container credentials URI)');
-                  return { accessKeyId: j.AccessKeyId, secretAccessKey: j.SecretAccessKey, sessionToken: j.Token };
-                }
-              } catch {}
-              await sleep(300*i);
-            }
-            return null;
-          }
-
-          // 2) IMDS (node or agent-proxied) – secondary
-          async function getImdsCreds() {
-            try {
-              const tRes = await timedFetch('http://169.254.169.254/latest/api/token', {
-                method:'PUT', headers:{'X-aws-ec2-metadata-token-ttl-seconds':'21600'}
-              }, 1500);
-              const token = tRes.ok ? await tRes.text() : '';
-              const h = token ? {'X-aws-ec2-metadata-token': token} : {};
-              const roleRes = await timedFetch('http://169.254.169.254/latest/meta-data/iam/security-credentials/', { headers: h }, 1500);
-              if (!roleRes.ok) return null;
-              const role = (await roleRes.text()).trim();
-              if (!role) return null;
-              const credRes = await timedFetch(`http://169.254.169.254/latest/meta-data/iam/security-credentials/${role}`, { headers: h }, 1500);
-              if (!credRes.ok) return null;
-              const c = await credRes.json();
-              core.info('Using IMDS credentials');
-              return { accessKeyId: c.AccessKeyId, secretAccessKey: c.SecretAccessKey, sessionToken: c.Token };
-            } catch { return null; }
-          }
-
-          // 3) Static keys (fallback)
-          function getStaticCreds() {
-            const ak = process.env.STATIC_AWS_ACCESS_KEY_ID || '';
-            const sk = process.env.STATIC_AWS_SECRET_ACCESS_KEY || '';
-            const st = process.env.STATIC_AWS_SESSION_TOKEN || '';
-            if (ak && sk) { core.info('Using static AWS keys'); return { accessKeyId: ak, secretAccessKey: sk, sessionToken: st || undefined }; }
-            return null;
-          }
-
-          // --- SigV4 ECR call -----------------------------------------------------
-          async function ecrCall(target, payload, creds) {
-            const body = JSON.stringify(payload);
-            const now = new Date();
-            const amzdate = now.toISOString().replace(/[-:]/g,'').replace(/\.\d{3}Z$/,'Z'); // YYYYMMDDTHHMMSSZ
-            const datestamp = amzdate.slice(0,8);
-            const service = 'ecr';
-
-            const hdrs = {
-              'content-type': 'application/x-amz-json-1.1',
-              'host': host,
-              'x-amz-date': amzdate,
-              'x-amz-target': `AmazonEC2ContainerRegistry_V20150921.${target}`,
-            };
-            if (creds.sessionToken) hdrs['x-amz-security-token'] = creds.sessionToken;
-
-            const signedNames = Object.keys(hdrs).sort();
-            const canonicalHeaders = signedNames.map(k => `${k}:${hdrs[k]}\n`).join('');
-            const signedHeaders = signedNames.join(';');
-            const canonicalRequest = ['POST','/','',canonicalHeaders,signedHeaders,sha256Hex(body)].join('\n');
-
-            const algorithm = 'AWS4-HMAC-SHA256';
-            const scope = `${datestamp}/${region}/${service}/aws4_request`;
-            const stringToSign = [algorithm, amzdate, scope, sha256Hex(canonicalRequest)].join('\n');
-
-            const kDate = hmac('AWS4' + creds.secretAccessKey, datestamp);
-            const kRegion = hmac(kDate, region);
-            const kService = hmac(kRegion, service);
-            const kSigning = hmac(kService, 'aws4_request');
-            const signature = hmacHex(kSigning, stringToSign);
-
-            const reqHeaders = {
-              'Content-Type': 'application/x-amz-json-1.1',
-              'X-Amz-Target': hdrs['x-amz-target'],
-              'X-Amz-Date':   hdrs['x-amz-date'],
-              'Authorization': `${algorithm} Credential=${creds.accessKeyId}/${scope}, SignedHeaders=${signedHeaders}, Signature=${signature}`,
-              'Host': host
-            };
-            if (creds.sessionToken) reqHeaders['X-Amz-Security-Token'] = creds.sessionToken;
-
-            const res = await fetch(`https://${host}/`, { method:'POST', headers:reqHeaders, body });
-            const text = await res.text(); let json; try { json = JSON.parse(text); } catch {}
-            if (!res.ok) throw new Error(`ECR ${target} ${res.status} ${(res.headers.get('x-amzn-errortype')||'')} ${text}`);
-            return json;
-          }
-
-          // Resolve creds: Pod Identity container URI → IMDS → static keys
-          let creds = await getPodIdentityCreds();
-          if (!creds) creds = await getImdsCreds();
-          if (!creds) creds = getStaticCreds();
-          if (!creds) throw new Error('No AWS credentials available (Pod Identity URI, IMDS, or static keys)');
-
-          // Ensure repo exists
-          try {
-            await ecrCall('DescribeRepositories', { repositoryNames: [repo] }, creds);
-            core.info(`ECR repository '${repo}' already exists.`);
-          } catch (e) {
-            if (String(e.message).includes('RepositoryNotFoundException')) {
-              core.info(`Creating ECR repository '${repo}' (scanOnPush=true)`);
-              await ecrCall('CreateRepository', {
-                repositoryName: repo,
-                imageScanningConfiguration: { scanOnPush: true }
-              }, creds);
-            } else {
-              throw e;
-            }
-          }
-
-
-
-    # login with pod identity / node role
+    # ── ECR login with whichever creds were chosen ─────────────────────────────
     - uses: aws-actions/amazon-ecr-login@v2
       name: 🔐 ECR login (identity/IMDS)
-      if: ${{ (inputs.push == 'aws' || inputs.push == 'both') && inputs.aws_access_key_id == '' }}
+      if: ${{ (inputs.push == 'aws' || inputs.push == 'both') && steps.awsauth.outputs.mode == 'identity' }}
       env:
         AWS_REGION: ${{ steps.awsreg.outputs.region }}
       with:
         registries: ${{ steps.awsreg.outputs.account }}
 
-    # login with static keys (fallback)
     - uses: aws-actions/amazon-ecr-login@v2
       name: 🔐 ECR login (static keys)
-      if: ${{ (inputs.push == 'aws' || inputs.push == 'both') && inputs.aws_access_key_id != '' }}
+      if: ${{ (inputs.push == 'aws' || inputs.push == 'both') && steps.awsauth.outputs.mode == 'static' }}
       env:
         AWS_REGION:            ${{ steps.awsreg.outputs.region }}
         AWS_ACCESS_KEY_ID:     ${{ inputs.aws_access_key_id }}
@@ -444,6 +330,8 @@ runs:
         AWS_SESSION_TOKEN:     ${{ inputs.aws_session_token }}
       with:
         registries: ${{ steps.awsreg.outputs.account }}
+
+
 
 
 

@@ -493,18 +493,6 @@ runs:
         (sudo systemctl status docker | head -n 20) 2>/dev/null || true
 
 
-    - name: 🚀 Start BuildKit (privileged, cgroups, 12345->12344)
-      if: "contains(runner.name, 'self-hosted')"
-      shell: bash
-      run: |
-        docker run -d --name buildkitd \
-          --privileged \
-          --cgroupns=host \
-          -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
-          -p 127.0.0.1:12345:12344 \
-          moby/buildkit:latest \
-          --addr tcp://0.0.0.0:12344
-
     - name: 🔧 Register remote BuildKit with buildx
       if: "contains(runner.name, 'self-hosted')"
       shell: bash

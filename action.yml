@@ -481,7 +481,6 @@ runs:
       shell: bash
       run: |
         docker buildx create --name remote-builder --driver remote tcp://127.0.0.1:12345
-        docker buildx use remote-builder
         docker buildx inspect --bootstrap
 
    

@@ -102,7 +102,12 @@ runs:
         installation_retrieval_payload: ${{ inputs.cd_repo }}
         revoke: true
 
-
+    # Detect which cloud this runner is on (self-hosted ⇒ aws/azure, GH-hosted ⇒ unknown)
+    - name: Detect cloud
+      id: cloud
+      uses: gitopsmanager/detect-cloud@main
+      with:
+        timeout-ms: 800
 
     - name: 📂 Checkout CD repo
       uses: actions/checkout@v4
@@ -309,7 +314,7 @@ runs:
                 token = process.env.AWS_CONTAINER_AUTHORIZATION_TOKEN;
               }
             } catch {}
-            const headers = token ? { Authorization: `Bearer ${token}` } : {};
+            const headers = token ? { Authorization: token } : {};
             // retry a bit; the agent might not be ready instantly
             for (let i=1; i<=5; i++) {
               try {
@@ -424,19 +429,19 @@ runs:
 
 
 
-    # login with pod identity / node role
+    # 🔐 ECR login (identity / IMDS) — only if the runner is on AWS
     - uses: aws-actions/amazon-ecr-login@v2
       name: 🔐 ECR login (identity/IMDS)
-      if: ${{ (inputs.push == 'aws' || inputs.push == 'both') && inputs.aws_access_key_id == '' }}
+      if: ${{ (inputs.push == 'aws' || inputs.push == 'both') && (steps.cloud.outputs.cloud == 'aws' || steps.cloud.outputs.provider == 'aws') }}
       env:
         AWS_REGION: ${{ steps.awsreg.outputs.region }}
       with:
         registries: ${{ steps.awsreg.outputs.account }}
 
-    # login with static keys (fallback)
+    # 🔐 ECR login (static keys) — only if NOT on AWS
     - uses: aws-actions/amazon-ecr-login@v2
       name: 🔐 ECR login (static keys)
-      if: ${{ (inputs.push == 'aws' || inputs.push == 'both') && inputs.aws_access_key_id != '' }}
+      if: ${{ (inputs.push == 'aws' || inputs.push == 'both') && (steps.cloud.outputs.cloud != 'aws' && steps.cloud.outputs.provider != 'aws') }}
       env:
         AWS_REGION:            ${{ steps.awsreg.outputs.region }}
         AWS_ACCESS_KEY_ID:     ${{ inputs.aws_access_key_id }}
@@ -444,7 +449,6 @@ runs:
         AWS_SESSION_TOKEN:     ${{ inputs.aws_session_token }}
       with:
         registries: ${{ steps.awsreg.outputs.account }}
-
 
 
 
@@ -509,12 +513,7 @@ runs:
 
 
 
-    # Detect which cloud this runner is on (self-hosted ⇒ aws/azure, GH-hosted ⇒ unknown)
-    - name: Detect cloud
-      id: cloud
-      uses: gitopsmanager/detect-cloud@main
-      with:
-        timeout-ms: 800
+
 
 
     # Set cache to ONE registry only (prefer the detected cloud)

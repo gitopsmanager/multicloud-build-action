@@ -332,7 +332,7 @@ runs:
 
             // now call the agent with header
             const headers = { Authorization: token };
-            const r = await tryFetch(uri, { headers }, 3000);
+            const r = await tryFetch(uri, { headers }, 15000);
             if (r && r._err) {
               core.info(`Agent fetch error: ${r._err}`);
               core.endGroup();

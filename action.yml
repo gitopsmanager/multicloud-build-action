@@ -278,7 +278,7 @@ runs:
         script: |
           const fs = require('fs/promises');
           const fetch = global.fetch;
-          const core = require('@actions/core');
+          
 
           // helper
           async function tryFetch(url, opts = {}, timeoutMs = 2500) {

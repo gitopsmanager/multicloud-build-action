@@ -393,7 +393,7 @@ runs:
         script: |
           const crypto = require('crypto');
           const fetch = global.fetch;
-          const core  = require('@actions/core');
+          
 
           const region = process.env.AWS_REGION;
           const repo   = process.env.ECR_REPO;

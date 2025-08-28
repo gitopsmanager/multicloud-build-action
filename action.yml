@@ -267,8 +267,7 @@ runs:
         echo "region=$REGION"  >> "$GITHUB_OUTPUT"
 
 
-
-    - name: Set AWS credentials
+    - name: Set AWS credentials (with diagnostics)
       if: ${{ inputs.push == 'aws' || inputs.push == 'both' }}
       uses: actions/github-script@v7
       env:
@@ -277,71 +276,24 @@ runs:
         STATIC_AWS_SECRET_ACCESS_KEY: ${{ inputs.aws_secret_access_key }}
       with:
         script: |
-          const fs = require('fs/promises');
+          const fs   = require('fs/promises');
+          const path = require('path');
           const fetch = global.fetch;
-
+          const core  = require('@actions/core');
 
           const providerOut = "${{ steps.cloud.outputs.provider }}";
           const cloudOut    = "${{ steps.cloud.outputs.cloud }}";
           const provider = (providerOut || cloudOut || '').toLowerCase();
-          core.info(`Detected provider: ${provider || 'unknown'}`);
 
-          async function tryFetch(url, opts = {}, timeoutMs = 2500) {
+          // ---------- helpers ----------
+          async function tryFetch(url, opts = {}, timeoutMs = 3000) {
             const ac = new AbortController();
             const t = setTimeout(() => ac.abort(), timeoutMs);
             try { return await fetch(url, { ...opts, signal: ac.signal }); }
-            catch { return null; }
+            catch (e) { return { _err: String(e) }; }
             finally { clearTimeout(t); }
           }
-
-          async function getPodIdentityCreds() {
-            const uri = process.env.AWS_CONTAINER_CREDENTIALS_FULL_URI || '';
-            const tokFile = process.env.AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE || '/var/run/secrets/pods.eks.amazonaws.com/serviceaccount/eks-pod-identity-token';
-            if (!uri) { core.info('Pod Identity: no FULL_URI set'); return null; }
-            let token = '';
-            try { token = (await fs.readFile(tokFile, 'utf8')).trim(); }
-            catch { core.info(`Pod Identity: token file not readable at ${tokFile}`); return null; }
-
-            const headers = token ? { Authorization: token } : {};
-            for (let i = 1; i <= 5; i++) {
-              const r = await tryFetch(uri, { headers }, 2000);
-              if (r && r.ok) {
-                const j = await r.json();
-                if (j.AccessKeyId && j.SecretAccessKey && j.Token) {
-                  core.info('Using Pod Identity credentials');
-                  return { accessKeyId: j.AccessKeyId, secretAccessKey: j.SecretAccessKey, sessionToken: j.Token };
-                }
-                core.info('Pod Identity: response missing fields');
-                break;
-              }
-              await new Promise(r => setTimeout(r, i * 300));
-            }
-            return null;
-          }
-
-          async function getImdsCreds() {
-            const tokRes = await tryFetch('http://169.254.169.254/latest/api/token', {
-              method: 'PUT', headers: { 'X-aws-ec2-metadata-token-ttl-seconds': '21600' }
-            }, 1500);
-            const imdsTok = tokRes && tokRes.ok ? await tokRes.text() : '';
-            const h = imdsTok ? { 'X-aws-ec2-metadata-token': imdsTok } : {};
-
-            const roleRes = await tryFetch('http://169.254.169.254/latest/meta-data/iam/security-credentials/', { headers: h }, 1500);
-            if (!roleRes || !roleRes.ok) { core.info('IMDS: no role list'); return null; }
-            const role = (await roleRes.text()).trim();
-            if (!role) { core.info('IMDS: empty role name'); return null; }
-
-            const credRes = await tryFetch(`http://169.254.169.254/latest/meta-data/iam/security-credentials/${role}`, { headers: h }, 1500);
-            if (!credRes || !credRes.ok) { core.info('IMDS: cred fetch failed'); return null; }
-            const c = await credRes.json();
-            if (c.AccessKeyId && c.SecretAccessKey) {
-              core.info('Using IMDS node role credentials');
-              return { accessKeyId: c.AccessKeyId, secretAccessKey: c.SecretAccessKey, sessionToken: c.Token || undefined };
-            }
-            core.info('IMDS: response missing fields');
-            return null;
-          }
-
+          function redact(s) { if (!s) return ''; return s.length > 16 ? s.slice(0,8) + '…' + s.slice(-4) : s; }
           function setEnv(creds, source) {
             core.exportVariable('AWS_ACCESS_KEY_ID', creds.accessKeyId);
             core.exportVariable('AWS_SECRET_ACCESS_KEY', creds.secretAccessKey);
@@ -349,21 +301,123 @@ runs:
             core.info(`Selected AWS credential source: ${source}`);
           }
 
-          if (provider === 'aws') {
-            // AWS: must succeed with Pod Identity or IMDS, otherwise fail
-            let creds = await getPodIdentityCreds();
-            if (creds) return setEnv(creds, 'PodIdentity');
-            creds = await getImdsCreds();
-            if (creds) return setEnv(creds, 'IMDS');
-            core.setFailed('Provider=aws but neither Pod Identity nor IMDS credentials are available');
-          } else {
-            // non-AWS: use static keys
-            const ak = process.env.STATIC_AWS_ACCESS_KEY_ID || '';
-            const sk = process.env.STATIC_AWS_SECRET_ACCESS_KEY || '';
-            if (!ak || !sk) return core.setFailed('Non-AWS provider and static AWS credentials not provided');
-            return setEnv({ accessKeyId: ak, secretAccessKey: sk }, 'Static');
+          // ---------- Pod Identity ----------
+          async function getPodIdentityCredsDiag() {
+            core.startGroup('Pod Identity diagnostics');
+            const uri = process.env.AWS_CONTAINER_CREDENTIALS_FULL_URI || '';
+            const tokFile = process.env.AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE
+              || '/var/run/secrets/pods.eks.amazonaws.com/serviceaccount/eks-pod-identity-token';
+
+            core.info(`AWS_CONTAINER_CREDENTIALS_FULL_URI: ${uri || '(unset)'}`);
+            core.info(`AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE: ${tokFile}`);
+
+            // quick connectivity probe (no auth header) just to see if it connects at all
+            if (uri) {
+              const probe = await tryFetch(uri, {}, 1500);
+              if (probe && probe._err) core.info(`Probe(no-auth) error: ${probe._err}`);
+              else if (probe) core.info(`Probe(no-auth) HTTP: ${probe.status}`);
+            }
+
+            let token = '';
+            try {
+              const st = await fs.stat(tokFile);
+              core.info(`Token file exists: size=${st.size} mtime=${st.mtime.toISOString()}`);
+              token = (await fs.readFile(tokFile, 'utf8')).trim();
+              core.info(`Token read: length=${token.length}`);
+            } catch (e) {
+              core.info(`Token file not readable: ${String(e)}`);
+              core.endGroup();
+              return null;
+            }
+
+            // now call the agent with header
+            const headers = { Authorization: token };
+            const r = await tryFetch(uri, { headers }, 3000);
+            if (r && r._err) {
+              core.info(`Agent fetch error: ${r._err}`);
+              core.endGroup();
+              return null;
+            }
+            if (!r || !r.ok) {
+              const body = r ? (await r.text().catch(()=>'')) : '';
+              core.info(`Agent HTTP: ${r ? r.status : 'none'} body: ${body.slice(0,200)}`);
+              core.endGroup();
+              return null;
+            }
+            const j = await r.json();
+            core.info('Agent responded OK');
+            if (j.AccessKeyId && j.SecretAccessKey && j.Token) {
+              core.endGroup();
+              return { accessKeyId: j.AccessKeyId, secretAccessKey: j.SecretAccessKey, sessionToken: j.Token };
+            }
+            core.info(`Agent JSON missing fields: ${Object.keys(j || {}).join(',')}`);
+            core.endGroup();
+            return null;
           }
 
+          // ---------- IMDS (node role) ----------
+          async function getImdsCredsDiag() {
+            core.startGroup('IMDS diagnostics');
+            // IMDSv2 token
+            const tRes = await tryFetch('http://169.254.169.254/latest/api/token', {
+              method: 'PUT',
+              headers: { 'X-aws-ec2-metadata-token-ttl-seconds': '21600' }
+            }, 1500);
+            if (tRes && tRes._err) core.info(`Token call error: ${tRes._err}`);
+            const imdsTok = (tRes && tRes.ok) ? await tRes.text() : '';
+            core.info(`IMDS token status: ${tRes ? tRes.status : 'none'} token-len=${imdsTok.length}`);
+
+            const h = imdsTok ? { 'X-aws-ec2-metadata-token': imdsTok } : {};
+            // role list
+            const roleRes = await tryFetch('http://169.254.169.254/latest/meta-data/iam/security-credentials/', { headers: h }, 1500);
+            if (roleRes && roleRes._err) core.info(`Role list error: ${roleRes._err}`);
+            const roleTxt = (roleRes && roleRes.ok) ? (await roleRes.text()).trim() : '';
+            core.info(`Role list status: ${roleRes ? roleRes.status : 'none'} role='${roleTxt}'`);
+
+            if (!roleTxt) { core.endGroup(); return null; }
+
+            // creds for role
+            const credRes = await tryFetch(`http://169.254.169.254/latest/meta-data/iam/security-credentials/${roleTxt}`, { headers: h }, 2000);
+            if (credRes && credRes._err) core.info(`Cred fetch error: ${credRes._err}`);
+            if (!credRes || !credRes.ok) {
+              core.info(`Cred fetch status: ${credRes ? credRes.status : 'none'}`);
+              core.endGroup(); return null;
+            }
+            const c = await credRes.json();
+            core.info(`Creds JSON keys: ${Object.keys(c).join(',')}`);
+            core.endGroup();
+
+            if (c.AccessKeyId && c.SecretAccessKey) {
+              return { accessKeyId: c.AccessKeyId, secretAccessKey: c.SecretAccessKey, sessionToken: c.Token || undefined };
+            }
+            return null;
+          }
+
+          // ---------- main ----------
+          core.info(`Provider reported by detect-cloud: ${provider || 'unknown'}`);
+
+          if (provider === 'aws') {
+            let creds = await getPodIdentityCredsDiag();
+            if (creds) return setEnv(creds, 'PodIdentity');
+            creds = await getImdsCredsDiag();
+            if (creds) return setEnv(creds, 'IMDS');
+            core.setFailed('Provider=aws but neither Pod Identity nor IMDS credentials are available. See diagnostics above.');
+            return;
+          }
+
+          // non-AWS → static keys
+          const ak = process.env.STATIC_AWS_ACCESS_KEY_ID || '';
+          const sk = process.env.STATIC_AWS_SECRET_ACCESS_KEY || '';
+          core.startGroup('Static credentials diagnostics');
+          core.info(`STATIC_AWS_ACCESS_KEY_ID present: ${ak ? 'yes' : 'no'}`);
+          core.info(`STATIC_AWS_SECRET_ACCESS_KEY present: ${sk ? 'yes' : 'no'}`);
+          core.endGroup();
+
+          if (!ak || !sk) {
+            core.setFailed('Non-AWS provider and static AWS credentials not provided');
+            return;
+          }
+          setEnv({ accessKeyId: ak, secretAccessKey: sk }, 'Static');
 
 
 

@@ -279,7 +279,7 @@ runs:
         script: |
           const fs = require('fs/promises');
           const fetch = global.fetch;
-          const core  = require('@actions/core');
+
 
           const providerOut = "${{ steps.cloud.outputs.provider }}";
           const cloudOut    = "${{ steps.cloud.outputs.cloud }}";

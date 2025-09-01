@@ -2,7 +2,7 @@
 
 Build and optionally push Docker images to **AWS ECR** and/or **Azure ACR** from a single action.  
 Optimized for **self-hosted AKS/EKS** runners (with a BuildKit sidecar) and works on **GitHub-hosted** runners too.  
-Uses **Buildx Bake** for parallel multi-image builds and reads default registries from a **JSON** env map.
+Uses **Buildx Bake** for parallel multi-image builds and reads default registries from inputs.
 
 > **Beta:** Pin to `@main` while testing. Stable tags (e.g., `v1`) will follow after broader validation.
 
@@ -32,7 +32,7 @@ This action works with the default `contents: read` permission that GitHub provi
 | Input                   | Required | Default      | Description                                                                                                   |
 |-------------------------|:--------:|--------------|---------------------------------------------------------------------------------------------------------------|
 | `image_details`         | ❌       |              | **JSON array** of `{context, build_file, image_name}`. If set, takes precedence.                              |
-| `image`                 | ✅*      |              | Single image repository/name (e.g., `team/svc-a`). **Required unless** `image_details` is provided.           |
+| `image`                 | ❌*      |              | Single image repository/name (e.g., `team/svc-a`). **Required unless** `image_details` is provided.           |
 | `build_file`            | ❌       | `Dockerfile` | Dockerfile path **relative to** `path` (single-image mode).                                                   |
 | `path`                  | ❌       | `.`          | Build context dir (single-image mode).                                                                        |
 | `tag`                   | ❌       | `""`         | Optional extra tag. Images are **always** tagged with `GITHUB_RUN_ID`; if set, this tag is added as well.     |
@@ -220,7 +220,7 @@ jobs:
 | Action                          | Version | Purpose(s)                                                                 |
 |---------------------------------|---------|----------------------------------------------------------------------------|
 | `actions/checkout`              | `v4`    | Checkout source repo; checkout CD repo                                     |
-| `actions/github-script`         | `v7`    | Load env config; ACR REST login; ECR ensure; normalize inputs; cache plan; generate `docker-bake.json` |
+| `actions/github-script`         | `v7`    | Check input registires; ACR REST login; ECR ensure; normalize inputs; cache plan; generate `docker-bake.json` |
 | `aws-actions/amazon-ecr-login`  | `v2`    | Docker login to ECR (Pod Identity / IMDS / static keys)                    |
 | `docker/setup-buildx-action`    | `v3`    | Setup Docker Buildx on GitHub-hosted runners                               |
 | `gitopsmanager/detect-cloud`    | `@main` | Detect cloud provider (AWS / Azure / unknown)                              |

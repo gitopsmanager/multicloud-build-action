@@ -653,6 +653,7 @@ runs:
           core.setOutput('items', JSON.stringify(out));
           core.setOutput('count', String(out.length));
 
+
     - name: generate-bake
       id: bakefile
       if: ${{ steps.enhance.outputs.count != '0' }}
@@ -674,6 +675,11 @@ runs:
           const AZ    = process.env.AZ_REG  || '';
           const ROOT  = process.env.GITHUB_WORKSPACE || process.cwd();
           const toPosix = p => p.replace(/\\/g, '/');
+          const toRel = (p) => {
+            if (!p) return '.';
+            const rel = path.isAbsolute(p) ? path.relative(ROOT, p) : p;
+            return toPosix(rel || '.');
+          };
 
           // Always present for both workflow_dispatch and triggered runs
           const RUN_TAG  = process.env.GITHUB_RUN_ID;
@@ -690,17 +696,15 @@ runs:
             if ((PUSH === 'azure' || PUSH === 'both') && AZ) TAGS_TO_USE.forEach(t => tags.push(`${AZ}/${it.image_name}:${t}`));
             if (PUSH === 'none' && it.image_name)           TAGS_TO_USE.forEach(t => tags.push(`${it.image_name}:${t}`));
 
-            // Context: if relative -> join with $GITHUB_WORKSPACE
+            // Make paths relative to $GITHUB_WORKSPACE (no absolute paths in bake.json)
             const ctxInput = it.context || '.';
-            const ctxPath  = path.isAbsolute(ctxInput) ? ctxInput : path.join(ROOT, ctxInput);
-
-            // Dockerfile: if relative -> join with $GITHUB_WORKSPACE (do NOT base on context)
             const dfInput  = it.build_file || 'Dockerfile';
-            const dfPath   = path.isAbsolute(dfInput) ? dfInput : path.join(ROOT, dfInput);
+            const ctxPath  = toRel(ctxInput);
+            const dfPath   = toRel(dfInput);
 
             target[name] = {
-              context:   toPosix(ctxPath),
-              dockerfile: toPosix(dfPath),
+              context:   ctxPath,
+              dockerfile: dfPath,
               tags
             };
 
@@ -722,7 +726,7 @@ runs:
     - name: bake
       uses: docker/bake-action@v6
       with:
-        source: /
+        source: .
         files: docker-bake.json
         push: ${{ inputs.push != 'none' }}
         # builder: remote-builder

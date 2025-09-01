@@ -653,7 +653,6 @@ runs:
           core.setOutput('items', JSON.stringify(out));
           core.setOutput('count', String(out.length));
 
-
     - name: generate-bake
       id: bakefile
       if: ${{ steps.enhance.outputs.count != '0' }}
@@ -669,17 +668,17 @@ runs:
           const fs = require('fs');
           const path = require('path');
 
-
           const items = JSON.parse(process.env.ITEMS || '[]');
           const PUSH  = (process.env.PUSH || 'none').toLowerCase();
           const AWS   = process.env.AWS_REG || '';
           const AZ    = process.env.AZ_REG  || '';
           const ROOT  = process.env.GITHUB_WORKSPACE || process.cwd();
-
-          const toPosix = (p) => p.replace(/\\/g, '/');
-
-          // Make path relative to ROOT (workspace)
-          const relToRoot = (p) => toPosix(path.isAbsolute(p) ? path.relative(ROOT, p) : p);
+          const toPosix = p => p.replace(/\\/g, '/');
+          const toRel = (p) => {
+            if (!p) return '.';
+            const rel = path.isAbsolute(p) ? path.relative(ROOT, p) : p;
+            return toPosix(rel || '.');
+          };
 
           // Always present for both workflow_dispatch and triggered runs
           const RUN_TAG  = process.env.GITHUB_RUN_ID;
@@ -696,23 +695,15 @@ runs:
             if ((PUSH === 'azure' || PUSH === 'both') && AZ) TAGS_TO_USE.forEach(t => tags.push(`${AZ}/${it.image_name}:${t}`));
             if (PUSH === 'none' && it.image_name)           TAGS_TO_USE.forEach(t => tags.push(`${it.image_name}:${t}`));
 
-            // Inputs (may be relative or absolute)
+            // Make paths relative to $GITHUB_WORKSPACE (no absolute paths in bake.json)
             const ctxInput = it.context || '.';
             const dfInput  = it.build_file || 'Dockerfile';
-
-            // Absolute paths for computation
-            const ctxAbs = path.resolve(ROOT, ctxInput);
-            const dfAbs  = path.isAbsolute(dfInput) ? dfInput : path.resolve(ROOT, dfInput);
-
-            // 1) context relative to ROOT
-            const ctxRelToRoot = relToRoot(ctxAbs) || '.';
-
-            // 2) dockerfile relative to CONTEXT (this avoids "context/context/..." duplication)
-            let dfRelToCtx = toPosix(path.relative(ctxAbs, dfAbs)) || 'Dockerfile';
+            const ctxPath  = toRel(ctxInput);
+            const dfPath   = toRel(dfInput);
 
             target[name] = {
-              context:   ctxRelToRoot,
-              dockerfile: dfRelToCtx,
+              context:   ctxPath,
+              dockerfile: dfPath,
               tags
             };
 
@@ -727,7 +718,6 @@ runs:
           core.startGroup('docker-bake.json');
           core.info(fs.readFileSync('docker-bake.json','utf8'));
           core.endGroup();
-
 
 
 

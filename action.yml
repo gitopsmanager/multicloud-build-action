@@ -3,7 +3,7 @@ name: Multicloud Build (composite)
 description: >
   Build and push Docker images to AWS ECR or Azure ACR using Docker/BuildKit.
   Supports AKS Workload Identity, Azure MSI/client secret, and EKS Pod Identity or static keys.
-  Loads default registries from a CD repo, optional BuildKit caching, and ECR repo auto-create.
+  Loads registries from inputs, optional BuildKit caching, and ECR repo auto-create.
 
 author: Affinity7 Consulting Ltd
 branding:

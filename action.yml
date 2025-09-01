@@ -40,28 +40,23 @@ inputs:
     description: "Additional buildkit args"
     required: false
     default: ""
-
-  cd_repo:
-    description: "CD repo (owner/repo) with cd/config/env-map.yaml providing default registries"
-    required: true
-
+  aws_registry:
+    description: "AWS ECR registry URL (required if push=aws or both)"
+    required: false
+    type: string
+  azure_registry:
+    description: "Azure ACR registry URL (required if push=azure or both)"
+    required: false
+    type: string
   push:
     description: "Where to push the image (aws | azure | both | none)"
     required: false
     default: "none"
-
   buildkit_cache_mode:
     description: "BuildKit cache mode (min|max|none). Caches only to the current cloud."
     required: false
     default: "max"
 
-  # GitHub App for CD repo checkout
-  cd_app_id:
-    description: "GitHub App ID for CD repo access"
-    required: true
-  cd_app_private_key:
-    description: "GitHub App private key (PEM) for CD repo access"
-    required: true
 
   # Azure credentials (used if not on AKS WI/MSI)
   azure_client_id:
@@ -92,15 +87,7 @@ runs:
 
   steps:
 
-    - name: 🔑 Generate GitHub App token
-      id: generate_token
-      uses: tibdex/github-app-token@v2.1.0
-      with:
-        app_id: ${{ inputs.cd_app_id }}
-        private_key: ${{ inputs.cd_app_private_key }}
-        installation_retrieval_mode: repository
-        installation_retrieval_payload: ${{ inputs.cd_repo }}
-        revoke: true
+
 
     # Detect which cloud this runner is on (self-hosted ⇒ aws/azure, GH-hosted ⇒ unknown)
     - name: Detect cloud
@@ -109,26 +96,53 @@ runs:
       with:
         timeout-ms: 800
 
-    - name: 📂 Checkout CD repo
-      uses: actions/checkout@v4
-      with:
-        repository: ${{ inputs.cd_repo }}
-        token: ${{ steps.generate_token.outputs.token }}
-        path: cd
 
-    - name: 📑 Load environment config
+    - name: 📑 Load registry config
       id: env
       uses: actions/github-script@v7
+      env:
+        AWS_REGISTRY: ${{ inputs.aws_registry }}
+        AZURE_REGISTRY: ${{ inputs.azure_registry }}
+        PUSH_TARGET: ${{ inputs.push }}   # expect aws | azure | both | none
       with:
         script: |
-          const fs = require('fs');
-          const path = require('path');
+          const core = require('@actions/core');
 
-          const cfg = JSON.parse(
-            fs.readFileSync(path.join(process.env.GITHUB_WORKSPACE, 'cd/config/env-map.json'), 'utf8')
-          );
-          core.setOutput('aws_registry',   cfg.build.aws_default_container_registry);
-          core.setOutput('azure_registry', cfg.build.azure_default_container_registry);
+          const aws = (process.env.AWS_REGISTRY || '').trim();
+          const azure = (process.env.AZURE_REGISTRY || '').trim();
+          const push = (process.env.PUSH_TARGET || 'none').toLowerCase();
+
+          core.setOutput('aws_registry', aws);
+          core.setOutput('azure_registry', azure);
+
+          switch (push) {
+            case 'aws':
+              if (!aws) {
+                core.setFailed("push=aws requested but aws_registry input was not provided");
+                process.exit(1);
+              }
+              break;
+            case 'azure':
+              if (!azure) {
+                core.setFailed("push=azure requested but azure_registry input was not provided");
+                process.exit(1);
+              }
+              break;
+            case 'both':
+              if (!aws || !azure) {
+                core.setFailed("push=both requested but aws_registry and/or azure_registry inputs are missing");
+                process.exit(1);
+              }
+              break;
+            case 'none':
+              core.info("push=none → no registry validation required");
+              break;
+            default:
+              core.setFailed(`Invalid push value: ${push}. Expected aws|azure|both|none.`);
+              process.exit(1);
+          }
+
+
 
     - name: 🔐 ACR login via REST (WI → MSI → secret; no az)
       if: ${{ inputs.push == 'azure' || inputs.push == 'both' }}

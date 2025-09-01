@@ -14,23 +14,8 @@ Uses **Buildx Bake** for parallel multi-image builds and reads default registrie
 - 🧺 **Buildx Bake**: parallel multi-image builds from either:
   - a single `{ image, build_file, path }` triple, or
   - a **JSON array** of `{ context, build_file, image_name }`.  
-- 🧠 **Smart cache**: BuildKit cache targeted to **the cloud the runner is on** (via `detect-cloud`), with sensible fallback on GitHub-hosted runners.  
-- 🗺️ **CD config (JSON)**: reads default registries from `cd/config/env-map.json`.  
+- 🧠 **Smart cache**: BuildKit cache targeted to **the cloud the runner is on** (via `detect-cloud`), with sensible fallback on GitHub-hosted runners.   
 - 🧰 **ECR ensure**: auto-creates the ECR repository on first push if missing.  
-
----
-
-- **Env map is JSON (not YAML).**  
-  The action reads `cd/config/env-map.json`:
-
-```json
-{
-  "build": {
-    "aws_default_container_registry": "123456789012.dkr.ecr.eu-west-1.amazonaws.com",
-    "azure_default_container_registry": "myacr.azurecr.io"
-  }
-}
-```
 
 ---
 
@@ -54,14 +39,15 @@ This action works with the default `contents: read` permission that GitHub provi
 | `push`                  | ❌       | `none`       | Where to push: `aws` \| `azure` \| `both` \| `none`.                                                          |
 | `buildkit_cache_mode`   | ❌       | `max`        | Cache mode: `none` \| `min` \| `max`. Cache goes to **one** registry (the detected cloud).                    |
 | `extra_args`            | ❌       | `""`         | Additional args to pass to BuildKit/Bake (advanced).                                                          |
-| `cd_repo`               | ✅       |              | CD repo (`owner/repo`) containing `cd/config/env-map.json` with default registries.                           |
-| `cd_app_id`             | ✅       |              | GitHub App ID (for reading the CD repo).                                                                      |
-| `cd_app_private_key`    | ✅       |              | GitHub App private key (PEM) for the CD repo.                                                                 |
+| `aws_registry`          | ❌       | `""`         | AWS ECR registry URL (e.g., `123456789012.dkr.ecr.eu-west-1.amazonaws.com`). **Required if** `push` includes `aws`. |
+| `azure_registry`        | ❌       | `""`         | Azure ACR registry URL (e.g., `myacr.azurecr.io`). **Required if** `push` includes `azure`.                   |
 | `azure_client_id`       | ❌       | `""`         | Azure client ID (fallback when not using WI/MSI).                                                             |
 | `azure_client_secret`   | ❌       | `""`         | Azure client secret (fallback).                                                                               |
 | `azure_tenant_id`       | ❌       | `""`         | Azure tenant ID (fallback).                                                                                   |
 | `aws_access_key_id`     | ❌       | `""`         | AWS access key (fallback when not using Pod Identity / node role).                                            |
 | `aws_secret_access_key` | ❌       | `""`         | AWS secret key (fallback).                                                                                    |
+
+
 
 \* `image` is required **unless** you set `image_details` (array mode).
 
@@ -79,15 +65,12 @@ This action works with the default `contents: read` permission that GitHub provi
 ## 🛠 What the action does
 
 1. **Detects cloud** (`azure` / `aws` / `unknown`) using `gitopsmanager/detect-cloud@main`.  
-2. **Loads registries** from `cd/config/env-map.json`:
-   - `build.aws_default_container_registry`
-   - `build.azure_default_container_registry`
-3. **Normalizes inputs** (single image or array) → generates `docker-bake.json`.  
-4. **Provider-aware cache**: chooses exactly **one** registry for cache (`cache-to` / `cache-from`).  
-5. **Logs into registries**:
+2. **Normalizes inputs** (single image or array) → generates `docker-bake.json`.  
+3. **Provider-aware cache**: chooses exactly **one** registry for cache (`cache-to` / `cache-from`).  
+4. **Logs into registries**:
    - **ACR:** REST flow (no `az`) with WI/MSI/secret.
    - **ECR:** Ensures repo exists (SigV4) and logs in (identity or keys).
-6. **Runs Buildx Bake** with `source: .` and pushes if requested.
+5. **Runs Buildx Bake** with `source: .` and pushes if requested.
 
 ---
 
@@ -140,7 +123,7 @@ To support Dockerfile `RUN` steps (e.g., `apt-get`) the BuildKit sidecar may nee
 - **Microsoft/AKS AppArmor annotation:** set the per-container annotation to unconfined.
 
 
-**How the workflow connects:**
+**How the workflow connects: (self-hosted)**
 ```bash
 docker buildx create --name remote-builder --driver remote tcp://127.0.0.1:12345
 docker buildx use remote-builder
@@ -151,13 +134,12 @@ docker buildx inspect --bootstrap
 
 GitHub-hosted runners do **not** expose a `buildkitd` at `127.0.0.1:12345`.
 
-Use the managed builder instead:
+They just use the managed builder only:
 
 ```yaml
 - uses: docker/setup-buildx-action@v3
 ```
 
-The “remote BuildKit on :12345” requirement applies only to self-hosted runners.
 ---
 
 ## 🧩 Bake plan & execution
@@ -177,21 +159,22 @@ jobs:
   build:
     permissions:
       contents: read
-      id-token: write
-    runs-on: ubuntu-latest # or self-hosted
+    runs-on: azure-ubuntu-self-hosted # build on azure and push to both
     steps:
       - uses: actions/checkout@v4
 
-      - uses: your-org/multicloud-build-action@main
+      - uses: gitopsmanager/multicloud-build-action@main
         with:
-          cd_repo: your-org/continuous-deployment
-          cd_app_id: ${{ secrets.CD_APP_ID }}
-          cd_app_private_key: ${{ secrets.CD_APP_PRIVATE_KEY }}
           image: team/svc-a
           build_file: Dockerfile
           path: ./services/a
           push: both                 # aws | azure | both | none
           buildkit_cache_mode: max   # none | min | max
+          aws_registry: ${{ vars.AWS_DEFAULT_CONTAINER_REGISTRY }}       # e.g. 123456789012.dkr.ecr.eu-west-1.amazonaws.com
+          azure_registry: ${{ vars.AZURE_DEFAULT_CONTAINER_REGISTRY }}   # e.g. myacr.azurecr.io
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}            # sensitive → SECRET
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}    # sensitive → SECRET
+
 ```
 
 ### B) Multiple images (JSON array)
@@ -201,16 +184,12 @@ jobs:
   build:
     permissions:
       contents: read
-      id-token: write
-    runs-on: ubuntu-latest
+    runs-on: aws-ubuntu-self-hosted # build on aws and push to both
     steps:
       - uses: actions/checkout@v4
 
-      - uses: your-org/multicloud-build-action@main
+      - uses: gitopsmanager/multicloud-build-action@main
         with:
-          cd_repo: your-org/continuous-deployment
-          cd_app_id: ${{ secrets.CD_APP_ID }}
-          cd_app_private_key: ${{ secrets.CD_APP_PRIVATE_KEY }}
           image_details: |
             [
               {"context":"./services/a","build_file":"Dockerfile","image_name":"team/svc-a"},
@@ -218,6 +197,11 @@ jobs:
             ]
           push: both
           buildkit_cache_mode: min
+          aws_registry: ${{ vars.AWS_DEFAULT_CONTAINER_REGISTRY }}
+          azure_registry: ${{ vars.AZURE_DEFAULT_CONTAINER_REGISTRY }}
+          azure_client_id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure_client_secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          azure_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
 ```
 
 ---
@@ -236,7 +220,6 @@ jobs:
 | Action                          | Version | Purpose(s)                                                                 |
 |---------------------------------|---------|----------------------------------------------------------------------------|
 | `actions/checkout`              | `v4`    | Checkout source repo; checkout CD repo                                     |
-| `tibdex/github-app-token`       | `v2.1.0`| Generate GitHub App token for CD repo access                               |
 | `actions/github-script`         | `v7`    | Load env config; ACR REST login; ECR ensure; normalize inputs; cache plan; generate `docker-bake.json` |
 | `aws-actions/amazon-ecr-login`  | `v2`    | Docker login to ECR (Pod Identity / IMDS / static keys)                    |
 | `docker/setup-buildx-action`    | `v3`    | Setup Docker Buildx on GitHub-hosted runners                               |

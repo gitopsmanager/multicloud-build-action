@@ -51,7 +51,7 @@ inputs:
   push:
     description: "Where to push the image (aws | azure | both | none)"
     required: false
-    default: "none"
+    default: "both"
   buildkit_cache_mode:
     description: "BuildKit cache mode (min|max|none). Caches only to the current cloud."
     required: false
@@ -722,7 +722,7 @@ runs:
     - name: bake
       uses: docker/bake-action@v6
       with:
-        source: .
+        source: /
         files: docker-bake.json
         push: ${{ inputs.push != 'none' }}
         # builder: remote-builder

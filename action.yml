@@ -106,7 +106,6 @@ runs:
         PUSH_TARGET: ${{ inputs.push }}   # expect aws | azure | both | none
       with:
         script: |
-          const core = require('@actions/core');
 
           const aws = (process.env.AWS_REGISTRY || '').trim();
           const azure = (process.env.AZURE_REGISTRY || '').trim();

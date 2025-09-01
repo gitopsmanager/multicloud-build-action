@@ -668,7 +668,7 @@ runs:
         script: |
           const fs = require('fs');
           const path = require('path');
-          const core = require('@actions/core');
+
 
           const items = JSON.parse(process.env.ITEMS || '[]');
           const PUSH  = (process.env.PUSH || 'none').toLowerCase();

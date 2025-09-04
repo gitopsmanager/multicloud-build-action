@@ -720,6 +720,76 @@ runs:
           core.endGroup();
 
 
+    - name: Convert extra_args to bake set
+      id: convert
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        TARGET="app"
+        INPUT="${{ inputs.extra_args || '' }}"
+        OUT=""
+
+        read -r -a TOKENS <<< "$INPUT"
+        i=0
+        while [ $i -lt ${#TOKENS[@]} ]; do
+          t="${TOKENS[$i]}"
+          case "$t" in
+            --build-arg)
+              i=$((i+1)); kv="${TOKENS[$i]}"
+              key="${kv%%=*}"; val="${kv#*=}"
+              OUT+="${TARGET}.args.${key}=${val}"$'\n'
+              ;;
+            --platform)
+              i=$((i+1)); val="${TOKENS[$i]}"
+              OUT+="${TARGET}.platform=${val}"$'\n'
+              ;;
+            --label)
+              i=$((i+1)); kv="${TOKENS[$i]}"
+              key="${kv%%=*}"; val="${kv#*=}"
+              OUT+="${TARGET}.labels.\"${key}\"=${val}"$'\n'
+              ;;
+            --tag|-t)
+              i=$((i+1)); val="${TOKENS[$i]}"
+              OUT+="${TARGET}.tags=${val}"$'\n'
+              ;;
+            --target)
+              i=$((i+1)); val="${TOKENS[$i]}"
+              OUT+="${TARGET}.target=${val}"$'\n'
+              ;;
+            --cache-from)
+              i=$((i+1)); val="${TOKENS[$i]}"
+              OUT+="${TARGET}.cache-from=${val}"$'\n'
+              ;;
+            --cache-to)
+              i=$((i+1)); val="${TOKENS[$i]}"
+              OUT+="${TARGET}.cache-to=${val}"$'\n'
+              ;;
+            --no-cache)
+              OUT+="${TARGET}.no-cache=true"$'\n'
+              ;;
+            --pull)
+              OUT+="${TARGET}.pull=true"$'\n'
+              ;;
+            --push)
+              OUT+="${TARGET}.push=true"$'\n'
+              ;;
+            *)
+              echo "⚠️ Skipping unsupported flag: $t" >&2
+              ;;
+          esac
+          i=$((i+1))
+        done
+
+        echo "✅ Converted extra_args into bake set lines:"
+        echo "$OUT"
+
+        echo "set_lines<<EOF" >> $GITHUB_OUTPUT
+        echo "$OUT" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+
+
+
 
     # Bake with live workspace (includes files generated earlier)
     - name: bake
@@ -728,5 +798,6 @@ runs:
         source: .
         files: docker-bake.json
         push: ${{ inputs.push != 'none' }}
+        set: ${{ steps.convert.outputs.set_lines }}
         # builder: remote-builder
 

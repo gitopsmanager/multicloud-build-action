@@ -719,14 +719,13 @@ runs:
           core.info(fs.readFileSync('docker-bake.json','utf8'));
           core.endGroup();
 
-
     - name: Convert extra_args to bake set
       id: convert
       shell: bash
       run: |
         set -euo pipefail
 
-        TARGET="app"
+        TARGET="*"
         INPUT="${{ inputs.extra_args || '' }}"
         OUT=""
 

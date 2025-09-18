@@ -1,10 +1,10 @@
-# 🚀 Multicloud Build Action (Composite) — *Beta* `@main`
+# 🚀 Multicloud Build Action (Composite) — *Stable* `@v1`
 
 Build and optionally push Docker images to **AWS ECR** and/or **Azure ACR** from a single action.  
 Optimized for **self-hosted AKS/EKS** runners (with a BuildKit sidecar) and works on **GitHub-hosted** runners too.  
 Uses **Buildx Bake** for parallel multi-image builds and reads default registries from inputs.
 
-> **Beta:** Pin to `@main` while testing. Stable tags (e.g., `v1`) will follow after broader validation.
+> **Stable:** Pin to `@v1`. Immutable releases (e.g., `v1.0.0`) are also available.
 
 ---
 
@@ -36,7 +36,7 @@ This action works with the default `contents: read` permission that GitHub provi
 | `build_file`            | ❌       | `Dockerfile` | Dockerfile path **relative to** `path` (single-image mode).                                                   |
 | `path`                  | ❌       | `.`          | Build context dir (single-image mode).                                                                        |
 | `tag`                   | ❌       | `""`         | Optional extra tag. Images are **always** tagged with `GITHUB_RUN_ID`; if set, this tag is added as well.     |
-| `push`                  | ❌       | `none`       | Where to push: `aws` \| `azure` \| `both` \| `none`.                                                          |
+| `push`                  | ❌       | `both`       | Where to push: `aws` \| `azure` \| `both` \| `none`.                                                          |
 | `buildkit_cache_mode`   | ❌       | `max`        | Cache mode: `none` \| `min` \| `max`. Cache goes to **one** registry (the detected cloud).                    |
 | `extra_args`            | ❌       | `""`         | Additional args to pass to BuildKit/Bake (advanced).                                                          |
 | `aws_registry`          | ❌       | `""`         | AWS ECR registry URL (e.g., `123456789012.dkr.ecr.eu-west-1.amazonaws.com`). **Required if** `push` includes `aws`. |
@@ -64,7 +64,7 @@ This action works with the default `contents: read` permission that GitHub provi
 
 ## 🛠 What the action does
 
-1. **Detects cloud** (`azure` / `aws` / `unknown`) using `gitopsmanager/detect-cloud@main`.  
+1. **Detects cloud** (`azure` / `aws` / `unknown`) using `gitopsmanager/detect-cloud@v1`.  
 2. **Normalizes inputs** (single image or array) → generates `docker-bake.json`.  
 3. **Provider-aware cache**: chooses exactly **one** registry for cache (`cache-to` / `cache-from`).  
 4. **Logs into registries**:
@@ -150,7 +150,7 @@ They just use the managed builder only:
 
 ---
 
-## 🧪 Usage (Beta `@main`)
+## 🧪 Usage (Stable @v1)
 
 ### A) Single image
 
@@ -163,7 +163,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: gitopsmanager/multicloud-build-action@main
+      - uses: gitopsmanager/multicloud-build-action@v1
         with:
           image: team/svc-a
           build_file: Dockerfile
@@ -188,7 +188,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: gitopsmanager/multicloud-build-action@main
+      - uses: gitopsmanager/multicloud-build-action@v1
         with:
           image_details: |
             [
@@ -220,10 +220,10 @@ jobs:
 | Action                          | Version | Purpose(s)                                                                 |
 |---------------------------------|---------|----------------------------------------------------------------------------|
 | `actions/checkout`              | `v4`    | Checkout source repo; checkout CD repo                                     |
-| `actions/github-script`         | `v7`    | Check input registires; ACR REST login; ECR ensure; normalize inputs; cache plan; generate `docker-bake.json` |
+| `actions/github-script`         | `v7`    | registires; ACR REST login; ECR ensure; normalize inputs; cache plan; generate `docker-bake.json` |
 | `aws-actions/amazon-ecr-login`  | `v2`    | Docker login to ECR (Pod Identity / IMDS / static keys)                    |
 | `docker/setup-buildx-action`    | `v3`    | Setup Docker Buildx on GitHub-hosted runners                               |
-| `gitopsmanager/detect-cloud`    | `@main` | Detect cloud provider (AWS / Azure / unknown)                              |
+| `gitopsmanager/detect-cloud`    | `@v1`   | Detect cloud provider (AWS / Azure / unknown)                              |
 | `docker/bake-action`            | `v6`    | Build & push with BuildKit Bake                                            |
 
 > If you push from **GH-hosted** runners, provide appropriate secrets for that cloud (Azure client secret or AWS keys).

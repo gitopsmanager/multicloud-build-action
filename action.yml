@@ -92,7 +92,7 @@ runs:
     # Detect which cloud this runner is on (self-hosted ⇒ aws/azure, GH-hosted ⇒ unknown)
     - name: Detect cloud
       id: cloud
-      uses: gitopsmanager/detect-cloud@main
+      uses: gitopsmanager/detect-cloud@v1
       with:
         timeout-ms: 800
 

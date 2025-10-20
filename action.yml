@@ -96,6 +96,52 @@ runs:
       with:
         timeout-ms: 800
 
+    - name: Report usage metrics (non-blocking)
+      uses: actions/github-script@v7
+      continue-on-error: true
+      env:
+        USAGE_ENDPOINT: https://gitopsmanager.io/github-action-metrics
+      with:
+        script: |
+          const fetch = global.fetch;
+          const endpoint = process.env.USAGE_ENDPOINT;
+          if (!endpoint) {
+            core.warning('❌ USAGE_ENDPOINT is not defined');
+            return;
+          }
+
+          const repoFull = process.env.GITHUB_REPOSITORY || "";
+          const [org, repo] = repoFull.split("/");
+
+          const payload = {
+            org,
+            repo,
+            action: "build", // or "build" etc.
+            timestamp: new Date().toISOString(),
+          };
+
+          core.info(`📊 Sending metrics: ${JSON.stringify(payload)}`);
+
+          try {
+            const resp = await fetch(endpoint, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload),
+            });
+
+            const text = await resp.text(); // read raw body once
+
+            if (resp.ok) {
+              core.info(`✅ Usage metrics reported successfully (${resp.status}).`);
+              core.info(`🔍 Response body: ${text}`);
+            } else {
+              core.warning(`⚠️ Metrics report failed: HTTP ${resp.status}`);
+              core.warning(`Response body: ${text}`);
+            }
+          } catch (err) {
+            core.warning(`❌ Metrics request threw: ${err.message}`);
+          }
+
 
     - name: 📑 Load registry config
       id: env

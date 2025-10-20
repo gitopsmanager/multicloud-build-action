@@ -53,6 +53,27 @@ This action works with the default `contents: read` permission that GitHub provi
 
 ---
 
+## 📊 Collection of Usage Metrics
+
+To understand adoption and improve our open-source tooling, **GitOps Manager** collects minimal, anonymized usage data from automated GitHub Actions that use our workflows and integrations.
+
+### What We Collect
+Each participating GitHub Action sends a small JSON payload containing:
+- **Action Type** – `"build"` or `"deploy"`
+- **GitHub Organization** and **Repository** (securely hashed for anonymity)
+- **Timestamp** of the event
+
+Example payload (after hashing):
+```json
+{
+  "action": "build",
+  "org": "11a6114071b1...",
+  "repo": "3ad2023afd63...",
+  "timestamp": "2025-10-20T19:04:18Z"
+}
+
+---
+
 ## 🔐 Auth (automatic selection)
 
 - **Azure (ACR):** AKS **Workload Identity** → node **MSI** (UAMI/SAI via IMDS) → **client secret** fallback.  

@@ -1,15 +1,18 @@
-# 🚀 Multicloud Build Action (Composite) — *Stable* `@v1`
+# 🚀 Multicloud Build Action (Composite) — *Open Source* & Stable `@v1`
 
 Build and optionally push Docker images to **AWS ECR** and/or **Azure ACR** from a single action.  
 Optimized for **self-hosted AKS/EKS** runners (with a BuildKit sidecar) and works on **GitHub-hosted** runners too.  
 Uses **Buildx Bake** for parallel multi-image builds and reads default registries from inputs.
 
+🧩 **Open Source:** Maintained by **Affinity7 Consulting Ltd**, this action is part of the [**GitOps Manager**](https://gitopsmanager.io) open-source toolchain — powering both community and enterprise automation for multi-cloud Kubernetes environments.
+
 > **Official Release:** This marks the first stable release under the new versioning policy (see below).  
 > **Stable:** Pin to `@v1`. Immutable releases (e.g., `v1.0.0`) are also available.
 
+
 ---
 
-## 🌐 GitOps Manager Enterprise
+## 🌐 GitOps Manager™ Enterprise Platform
 
 [**GitOps Manager Enterprise**](https://gitopsmanager.io) is the full platform that powers this open-source action.  
 It’s a **turnkey GitOps automation platform** for AWS and Azure — combining open-source GitHub Actions, Kubernetes infrastructure automation, and global-scale CI/CD.

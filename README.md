@@ -9,18 +9,6 @@ Uses **Buildx Bake** for parallel multi-image builds and reads default registrie
 
 ---
 
-## ✅ Highlights
-
-- 🐳 **Build once** and **push** to **AWS**, **Azure**, **both**, or **build-only**.  
-- 🧺 **Buildx Bake**: parallel multi-image builds from either:
-  - a single `{ image, build_file, path }` triple, or
-  - a **JSON array** of `{ context, build_file, image_name }`.  
-- 🧠 **Smart cache**: BuildKit cache targeted to **the cloud the runner is on** (via `detect-cloud`), with sensible fallback on GitHub-hosted runners.   
-- 🧰 **ECR ensure**: auto-creates the ECR repository on first push if missing.  
-
----
-
-
 ## 🌐 GitOps Manager Enterprise
 
 [**GitOps Manager Enterprise**](https://gitopsmanager.io) is the full platform that powers this open-source action.  
@@ -37,6 +25,20 @@ It’s a **turnkey GitOps automation platform** for AWS and Azure — combining 
 
 
 ---
+
+## ✅ Highlights - Multicloud Build Action
+
+- 🐳 **Build once** and **push** to **AWS**, **Azure**, **both**, or **build-only**.  
+- 🧺 **Buildx Bake**: parallel multi-image builds from either:
+  - a single `{ image, build_file, path }` triple, or
+  - a **JSON array** of `{ context, build_file, image_name }`.  
+- 🧠 **Smart cache**: BuildKit cache targeted to **the cloud the runner is on** (via `detect-cloud`), with sensible fallback on GitHub-hosted runners.   
+- 🧰 **ECR ensure**: auto-creates the ECR repository on first push if missing.  
+
+---
+
+
+
 
 ## 🔑 Required permissions
 

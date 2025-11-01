@@ -20,6 +20,24 @@ Uses **Buildx Bake** for parallel multi-image builds and reads default registrie
 
 ---
 
+
+## 🌐 GitOps Manager Enterprise
+
+[**GitOps Manager Enterprise**](https://gitopsmanager.io) is the full platform that powers this open-source action.  
+It’s a **turnkey GitOps automation platform** for AWS and Azure — combining open-source GitHub Actions, Kubernetes infrastructure automation, and global-scale CI/CD.
+
+**Highlights:**
+- Secure, opinionated **multi-cloud GitOps automation** for Kubernetes workloads.  
+- Deep integration with **ArgoCD**, **Argo Workflows**, **Traefik**, **ECK**, and **Kubernetes Dashboard**.  
+- Built for **high availability**, **autoscaling**, and **managed upgrades**.  
+- Supports **Workload Identity**, **Pod Identity**, and **private, network-isolated clusters**.  
+- Enables **global deployments**, **secret management**, and **production-grade infrastructure** with **zero vendor lock-in**.
+
+🔗 Learn more: [https://gitopsmanager.io](https://gitopsmanager.io)
+
+
+---
+
 ## 🔑 Required permissions
 
 No additional permissions are required.  
@@ -136,24 +154,7 @@ From now on, they will always follow these simple, reliable rules:
 All tags will now **increment forward permanently** — no re-use or re-tagging of old versions.  
 This marks the **official release** of the action under the **Affinity7 Consulting** stable versioning model.
 
----
 
-## 🌐 GitOps Manager Enterprise
-
-[**GitOps Manager Enterprise**](https://gitopsmanager.io) is the full platform that powers this open-source action.  
-It’s a **turnkey GitOps automation platform** for AWS and Azure — combining open-source GitHub Actions, Kubernetes infrastructure automation, and global-scale CI/CD.
-
-**Highlights:**
-- Secure, opinionated **multi-cloud GitOps automation** for Kubernetes workloads.  
-- Deep integration with **ArgoCD**, **Argo Workflows**, **Traefik**, **ECK**, and **Kubernetes Dashboard**.  
-- Built for **high availability**, **autoscaling**, and **managed upgrades**.  
-- Supports **Workload Identity**, **Pod Identity**, and **private, network-isolated clusters**.  
-- Enables **global deployments**, **secret management**, and **production-grade infrastructure** with **zero vendor lock-in**.
-
-🔗 Learn more: [https://gitopsmanager.io](https://gitopsmanager.io)
-
-
----
 
 ## 🧾 License
 

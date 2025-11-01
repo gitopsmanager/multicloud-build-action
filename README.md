@@ -27,6 +27,23 @@ This action works with the default `contents: read` permission that GitHub provi
 
 ---
 
+## 📦 External Actions Used
+
+| Action                               | Pinned Version | Purpose                                                                                 |
+|--------------------------------------|----------------|-----------------------------------------------------------------------------------------|
+| `actions/checkout`                   | `v4`           | Check out source repo (and optionally a CD repo)                                       |
+| `actions/github-script`              | `v7`           | Registry config, ACR REST login, ECR ensure (SigV4), input normalization, bake file gen |
+| `aws-actions/amazon-ecr-login`       | `v2`           | Docker login to ECR (Pod Identity / IMDS / static keys)                                |
+| `docker/setup-buildx-action`         | `v3`           | Setup Docker Buildx on GitHub-hosted runners                                           |
+| `docker/bake-action`                 | `v6`           | Build & push with BuildKit Bake                                                        |
+| `gitopsmanager/detect-cloud`         | `v1`           | Detect cloud provider (AWS / Azure / unknown)                                          |
+
+> 🔒 **Pinning advice:**  
+> - For most users, pinning to the **major tag** (e.g., `@v3`) is a good balance of stability + updates.  
+> - For **strict reproducibility**, pin by **commit SHA** (e.g., `docker/bake-action@<sha>`).
+
+---
+
 ## 🧩 Inputs
 
 | Input                   | Required | Default      | Description                                                                                                   |

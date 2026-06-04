@@ -5,7 +5,7 @@ description: >
   Supports AKS Workload Identity, Azure MSI/client secret, and EKS Pod Identity or static keys.
   Loads registries from inputs, optional BuildKit caching, and ECR repo auto-create.
 
-author: Affinity7 Consulting Ltd
+author: GitOps Manager, S.L.
 branding:
   icon: package
   color: blue
@@ -97,7 +97,7 @@ runs:
         timeout-ms: 800
 
     - name: Report usage metrics (non-blocking)
-      uses: actions/github-script@v7
+      uses: actions/github-script@v9
       continue-on-error: true
       env:
         USAGE_ENDPOINT: https://gitopsmanager.io/github-action-metrics
@@ -145,7 +145,7 @@ runs:
 
     - name: 📑 Load registry config
       id: env
-      uses: actions/github-script@v7
+      uses: actions/github-script@v9
       env:
         AWS_REGISTRY: ${{ inputs.aws_registry }}
         AZURE_REGISTRY: ${{ inputs.azure_registry }}
@@ -191,7 +191,7 @@ runs:
 
     - name: 🔐 ACR login via REST (WI → MSI → secret; no az)
       if: ${{ inputs.push == 'azure' || inputs.push == 'both' }}
-      uses: actions/github-script@v7
+      uses: actions/github-script@v9
       env:
         # Your registry host, e.g. "af7gitops.azurecr.io"
         AZURE_REGISTRY: ${{ steps.env.outputs.azure_registry }}
@@ -328,7 +328,7 @@ runs:
 
     - name: Set AWS credentials (with diagnostics)
       if: ${{ inputs.push == 'aws' || inputs.push == 'both' }}
-      uses: actions/github-script@v7
+      uses: actions/github-script@v9
       env:
         NO_PROXY: 169.254.170.23,169.254.169.254
         STATIC_AWS_ACCESS_KEY_ID:     ${{ inputs.aws_access_key_id }}
@@ -481,7 +481,7 @@ runs:
 
     - name: normalize-inputs
       id: normalize
-      uses: actions/github-script@v7
+      uses: actions/github-script@v9
       env:
         IMAGE_DETAILS: ${{ inputs.image_details }}
         SINGLE_IMAGE:  ${{ inputs.image }}
@@ -514,7 +514,7 @@ runs:
 
     - name: Ensure ECR repositories exist
       if: ${{ inputs.push == 'aws' || inputs.push == 'both' }}
-      uses: actions/github-script@v7
+      uses: actions/github-script@v9
       env:
         AWS_REGION: ${{ steps.awsreg.outputs.region }}
         ITEMS:      ${{ steps.normalize.outputs.items }}
@@ -616,11 +616,9 @@ runs:
 
     - name: 🔐 ECR login
       if: ${{ inputs.push == 'aws' || inputs.push == 'both' }}
-      uses: aws-actions/amazon-ecr-login@v2
-      env:
-        AWS_REGION: ${{ steps.awsreg.outputs.region }}
+      uses: docker/login-action@v4
       with:
-        registries: ${{ steps.awsreg.outputs.account }}
+        registry: ${{ steps.env.outputs.aws_registry }}
 
 
 
@@ -632,7 +630,7 @@ runs:
     # GitHub-hosted: set up managed Buildx
     - name: 🐳 Set up Docker Buildx
       if: ${{ steps.cloud.outputs.provider == 'unknown' }}
-      uses: docker/setup-buildx-action@v3
+      uses: docker/setup-buildx-action@v4
 
     # Self-hosted (AKS/EKS): register remote BuildKit
     - name: 🔧 Register remote BuildKit with buildx
@@ -654,7 +652,7 @@ runs:
     # Set cache to ONE registry only (prefer the detected cloud)
     - name: set-cache-to-provider
       id: enhance
-      uses: actions/github-script@v7
+      uses: actions/github-script@v9
       env:
         ITEMS:    ${{ steps.normalize.outputs.items }}
         PROVIDER: ${{ steps.cloud.outputs.provider }}     # aws | azure | unknown
@@ -702,7 +700,7 @@ runs:
     - name: generate-bake
       id: bakefile
       if: ${{ steps.enhance.outputs.count != '0' }}
-      uses: actions/github-script@v7
+      uses: actions/github-script@v9
       env:
         ITEMS:    ${{ steps.enhance.outputs.items }}
         PUSH:     ${{ inputs.push }}
@@ -838,7 +836,7 @@ runs:
 
     # Bake with live workspace (includes files generated earlier)
     - name: bake
-      uses: docker/bake-action@v6
+      uses: docker/bake-action@v7
       with:
         source: .
         files: docker-bake.json

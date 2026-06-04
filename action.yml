@@ -623,26 +623,19 @@ runs:
 
 
 
-
-
-
-
     # GitHub-hosted: set up managed Buildx
     - name: 🐳 Set up Docker Buildx
-      if: ${{ steps.cloud.outputs.provider == 'unknown' }}
+      if: ${{ steps.cloud.outputs.provider == 'unknown' || runner.environment == 'github-hosted' }}
       uses: docker/setup-buildx-action@v4
 
     # Self-hosted (AKS/EKS): register remote BuildKit
     - name: 🔧 Register remote BuildKit with buildx
-      if: ${{ steps.cloud.outputs.provider != 'unknown' }}
+      if: ${{ steps.cloud.outputs.provider != 'unknown' && runner.environment != 'github-hosted' }}
       shell: bash
       run: |
         docker buildx create --name remote-builder --driver remote tcp://127.0.0.1:12345
         docker buildx use remote-builder
-        docker buildx inspect --bootstrap
-
-
-   
+        docker buildx inspect --bootstrap   
 
 
 

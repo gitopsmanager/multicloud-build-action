@@ -4,7 +4,7 @@ Build and optionally push Docker images to **AWS ECR** and/or **Azure ACR** from
 Optimized for **self-hosted AKS/EKS** runners (with a BuildKit sidecar) and works on **GitHub-hosted** runners too.  
 Uses **Buildx Bake** for parallel multi-image builds and reads default registries from inputs.
 
-🧩 **Open Source:** Maintained by **Affinity7 Consulting Ltd**, this action is part of the [**GitOps Manager**](https://gitopsmanager.io) open-source toolchain — powering both community and enterprise automation for multi-cloud Kubernetes environments.
+🧩 **Open Source:** Maintained by **GitOps Manager, S.L.**, this action is part of the [**GitOps Manager**](https://gitopsmanager.io) open-source toolchain — powering both community and enterprise automation for multi-cloud Kubernetes environments.
 
 > **Official Release:** This marks the first stable release under the new versioning policy (see below).  
 > **Stable:** Pin to `@v1`. Immutable releases (e.g., `v1.0.0`) are also available.
@@ -234,10 +234,10 @@ From now on, they will always follow these simple, reliable rules:
 - **`@v1.4.7`** → Frozen snapshot for exact reproducibility.
 
 All tags will now **increment forward permanently** — no re-use or re-tagging of old versions.  
-This marks the **official release** of the action under the **Affinity7 Consulting** stable versioning model.
+This marks the **official release** of the action under the **GitOps Manager** stable versioning model.
 
 
 
 ## 🧾 License
 
-MIT © 2025 Affinity7 Consulting Ltd — see `LICENSE`.
+MIT © 2025 GitOps Manager, S.L. — see `LICENSE`.

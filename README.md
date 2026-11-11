@@ -163,10 +163,10 @@ To understand adoption and improve our open-source tooling, **GitOps Manager** c
 ### What We Collect
 Each participating GitHub Action sends a small JSON payload containing:
 - **Action Type** – `"build"` or `"deploy"`
-- **GitHub Organization** and **Repository** (securely hashed for anonymity)
+- **GitHub Organization** and **Repository** names — sent over HTTPS, then hashed on receipt (HMAC-SHA256 with a secret key). Only the hashes are stored, and only totals are published.
 - **Timestamp** of the event
 
-Example payload (after hashing):
+Example of what is stored (after hashing):
 ```json
 {
   "action": "build",
